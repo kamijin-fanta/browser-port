@@ -1,10 +1,21 @@
+# Rust
 target/
 tmp/
+
+# Python
 **/__pycache__/
 *.pyc
-*.user
-*.suo
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Xcode / Apple
+DerivedData/
+build/
+*.xcuserstate
+*.xcuserdata/
+
+# OS / editor noise
 .DS_Store
+*.user
+*.suo

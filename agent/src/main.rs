@@ -498,7 +498,10 @@ impl OutputProcessManager {
     }
 
     fn make_command(&self, output_name: &str) -> Result<Command, String> {
-        let env_name = format!("BROWSER_PORT_{}_HELPER_CMD", output_name.to_ascii_uppercase());
+        let env_name = format!(
+            "BROWSER_PORT_{}_HELPER_CMD",
+            output_name.to_ascii_uppercase()
+        );
         if let Ok(command_line) = env::var(&env_name) {
             if command_line.trim().is_empty() {
                 return Err(format!("{env_name} is empty"));
@@ -1036,7 +1039,8 @@ async fn handle_text_message(
         }
         Role::Client => {
             if msg_type == "browser-port-control" {
-                handle_browser_port_control(state, conn_tx, &value, bind_addr, output_manager).await;
+                handle_browser_port_control(state, conn_tx, &value, bind_addr, output_manager)
+                    .await;
                 return;
             }
             if msg_type == "helper-stats" {
@@ -1117,6 +1121,19 @@ async fn handle_browser_port_control(
             );
             return;
         };
+
+        #[cfg(target_os = "macos")]
+        if output_name == "spout" {
+            send_json_message(
+                conn_tx,
+                error_message(
+                    "E_UNSUPPORTED_MESSAGE",
+                    "spout is not supported on macOS; use syphon output",
+                    None,
+                ),
+            );
+            return;
+        }
 
         let (enabled, available) = {
             let mut lock = state.write().await;
@@ -1469,6 +1486,30 @@ async fn build_browser_port_stats_payload(
         })
         .collect::<Vec<_>>();
 
+    let mut outputs = serde_json::Map::new();
+    outputs.insert(
+        "ndi".to_string(),
+        json!({
+            "enabled": output_flags.ndi_enabled,
+            "available": output_availability.ndi_available,
+        }),
+    );
+    #[cfg(not(target_os = "macos"))]
+    outputs.insert(
+        "spout".to_string(),
+        json!({
+            "enabled": output_flags.spout_enabled,
+            "available": output_availability.spout_available,
+        }),
+    );
+    outputs.insert(
+        "syphon".to_string(),
+        json!({
+            "enabled": output_flags.syphon_enabled,
+            "available": output_availability.syphon_available,
+        }),
+    );
+
     json!({
         "type": "status",
         "event": "browser-port-stats",
@@ -1476,20 +1517,7 @@ async fn build_browser_port_stats_payload(
         "extensions": ext_count,
         "clients": client_count,
         "playersRegistered": players_registered,
-        "outputs": {
-            "ndi": {
-                "enabled": output_flags.ndi_enabled,
-                "available": output_availability.ndi_available,
-            },
-            "spout": {
-                "enabled": output_flags.spout_enabled,
-                "available": output_availability.spout_available,
-            },
-            "syphon": {
-                "enabled": output_flags.syphon_enabled,
-                "available": output_availability.syphon_available,
-            },
-        },
+        "outputs": outputs,
         "players": players,
     })
 }

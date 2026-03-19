@@ -7,15 +7,15 @@ use openh264::formats::YUVSource;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::os::raw::c_char;
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::ptr;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(target_os = "windows")]
@@ -44,7 +44,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVLowLatencyMode, CLSID_MSH264DecoderMFT, ICodecAPI, IMF2DBuffer, IMFDXGIBuffer,
+    CLSID_MSH264DecoderMFT, CODECAPI_AVLowLatencyMode, ICodecAPI, IMF2DBuffer, IMFDXGIBuffer,
     IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform,
     MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_ARGB32, MFVideoFormat_H264,
@@ -365,7 +365,9 @@ fn run_decode_stage(
 
         if let Some(queue) = pending_video.get_mut(&player_id) {
             while let Some(chunk) = queue.pop_front() {
-                if let Some(frame) = decoder.decode(&chunk.payload, chunk.keyframe, chunk.timestamp_us) {
+                if let Some(frame) =
+                    decoder.decode(&chunk.payload, chunk.keyframe, chunk.timestamp_us)
+                {
                     latest_decoded.insert(player_id, frame.clone());
                 }
             }
@@ -1168,9 +1170,9 @@ impl MfD3d11Decoder {
                 Ok(false) => eprintln!(
                     "output-helper: mf-d3d11 low-latency mode unsupported on this decoder"
                 ),
-                Err(err) => eprintln!(
-                    "output-helper: mf-d3d11 low-latency mode setup failed: {err}"
-                ),
+                Err(err) => {
+                    eprintln!("output-helper: mf-d3d11 low-latency mode setup failed: {err}")
+                }
             }
 
             set_decoder_input_type(&transform)?;
@@ -1275,7 +1277,8 @@ impl MfD3d11Decoder {
                 let sample = unsafe { MFCreateSample().context("MFCreateSample(output) failed")? };
                 let buffer_len = self.output_sample_size.max(1);
                 let buffer = unsafe {
-                    MFCreateMemoryBuffer(buffer_len).context("MFCreateMemoryBuffer(output) failed")?
+                    MFCreateMemoryBuffer(buffer_len)
+                        .context("MFCreateMemoryBuffer(output) failed")?
                 };
                 unsafe {
                     sample
@@ -2810,6 +2813,7 @@ impl DecoderState {
         };
         let Some(timings) = timings else {
             self.consecutive_empty_decodes = self.consecutive_empty_decodes.saturating_add(1);
+            #[cfg(target_os = "windows")]
             if backend == DecodeBackendKind::MfD3d11
                 && self.texture_fastpath_enabled
                 && self.consecutive_empty_decodes >= FASTPATH_DECODE_STALL_THRESHOLD
@@ -3051,6 +3055,7 @@ impl DecoderState {
         self.perf.crop_applied = self.frame.crop_applied;
         self.perf.effective_width = self.frame.width as u64;
         self.perf.effective_height = self.frame.height as u64;
+        #[cfg(target_os = "windows")]
         if self.frame.dx11_texture.is_some() && self.frame.bgra.is_empty() {
             self.perf.frame_mean_luma = -1.0;
             self.perf.frame_non_black_ratio = -1.0;
@@ -3199,6 +3204,8 @@ fn create_decoder_backend(
     #[cfg(target_os = "windows")] preferred_dx11_device: Option<*mut std::ffi::c_void>,
     texture_fastpath_enabled: bool,
 ) -> anyhow::Result<Box<dyn VideoDecoder>> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = texture_fastpath_enabled;
     match backend {
         #[cfg(target_os = "windows")]
         DecodeBackendKind::MfD3d11 => Ok(Box::new(MfD3d11Decoder::new(
@@ -3715,7 +3722,10 @@ impl OutputBackend {
                     self.spout_has_real_frame.remove(&player_id);
                     self.spout_device_key.remove(&player_id);
                     self.spout_dimensions.remove(&player_id);
-                    eprintln!("output-helper: cleared spout sender player={} reason={}", player_id, reason);
+                    eprintln!(
+                        "output-helper: cleared spout sender player={} reason={}",
+                        player_id, reason
+                    );
                 }
             }
             OutputMode::Syphon => {
@@ -3767,7 +3777,8 @@ impl OutputBackend {
             } else if desired_device_key == 0 || desired_device_key == current_device_key {
                 return sender;
             } else {
-                let actual_device_key = unsafe { browser_port_spout_sender_device(sender) as usize };
+                let actual_device_key =
+                    unsafe { browser_port_spout_sender_device(sender) as usize };
                 if actual_device_key != 0 && actual_device_key == desired_device_key {
                     self.spout_device_key.insert(player_id, actual_device_key);
                     return sender;
@@ -4076,6 +4087,9 @@ impl OutputBackend {
     fn send_syphon(&mut self, player_id: u32, frame: &DecodedFrame) -> VideoSendResult {
         let width = frame.width;
         let height = frame.height;
+        if width == 0 || height == 0 || frame.bgra.is_empty() {
+            return VideoSendResult::not_sent();
+        }
         let sender = self.syphon.entry(player_id).or_insert_with(|| {
             let name =
                 CString::new(format!("browser-port-syphon-{player_id}")).expect("valid cstring");
@@ -4084,7 +4098,7 @@ impl OutputBackend {
         if sender.is_null() {
             return VideoSendResult::not_sent();
         }
-        let _ = unsafe {
+        let sent = unsafe {
             browser_port_syphon_send_bgra(
                 *sender,
                 frame.bgra.as_ptr(),
@@ -4092,8 +4106,26 @@ impl OutputBackend {
                 height.try_into().unwrap_or(u32::MAX),
             )
         };
+        if !sent {
+            let native_reason = unsafe {
+                let ptr = browser_port_syphon_last_error();
+                if ptr.is_null() {
+                    None
+                } else {
+                    CStr::from_ptr(ptr).to_str().ok()
+                }
+            };
+            eprintln!(
+                "output-helper: syphon send failed player={} size={}x{} reason={}",
+                player_id,
+                width,
+                height,
+                native_reason.unwrap_or("(none)")
+            );
+            return VideoSendResult::not_sent();
+        }
         VideoSendResult {
-            sent: true,
+            sent,
             path: SendPath::Syphon,
             spout_bridge_metrics: None,
             texture_attempted: false,
@@ -4296,7 +4328,9 @@ unsafe extern "C" {
         texture: *mut std::ffi::c_void,
     ) -> bool;
     fn browser_port_spout_last_error() -> *const c_char;
-    fn browser_port_spout_sender_device(sender: *mut BrowserPortSpoutSender) -> *mut std::ffi::c_void;
+    fn browser_port_spout_sender_device(
+        sender: *mut BrowserPortSpoutSender,
+    ) -> *mut std::ffi::c_void;
     fn browser_port_spout_sender_take_last_send_metrics(
         sender: *mut BrowserPortSpoutSender,
         swap_ms: *mut f64,
@@ -4322,5 +4356,6 @@ unsafe extern "C" {
         width: u32,
         height: u32,
     ) -> bool;
+    fn browser_port_syphon_last_error() -> *const c_char;
     fn browser_port_syphon_destroy_sender(sender: *mut BrowserPortSyphonSender);
 }

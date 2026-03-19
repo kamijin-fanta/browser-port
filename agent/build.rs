@@ -42,7 +42,9 @@ fn build_windows_spout() {
     }
     build.compile("browser_port_spout_bridge");
 
-    for lib in ["User32", "Gdi32", "Dwmapi", "Dxgi", "D3D11", "D3D9", "Strmiids", "Shlwapi"] {
+    for lib in [
+        "User32", "Gdi32", "Dwmapi", "Dxgi", "D3D11", "D3D9", "Strmiids", "Shlwapi",
+    ] {
         println!("cargo:rustc-link-lib={lib}");
     }
 }
@@ -56,17 +58,15 @@ fn build_macos_syphon() {
     build.cpp(true);
     build.file("native/syphon/syphon_bridge.mm");
     println!("cargo:rerun-if-changed=native/syphon/syphon_bridge.mm");
+    if cfg!(target_env = "msvc") {
+        build.flag("/std:c++17");
+    } else {
+        build.flag("-std=c++17");
+    }
     build.flag("-fobjc-arc");
     build.compile("browser_port_syphon_bridge");
 
-    for framework in [
-        "Foundation",
-        "AppKit",
-        "QuartzCore",
-        "Metal",
-        "OpenGL",
-        "Syphon",
-    ] {
+    for framework in ["Foundation", "AppKit", "QuartzCore", "Metal", "OpenGL"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
 }

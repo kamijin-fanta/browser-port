@@ -1,3 +1,6 @@
 [submodule "agent/native/spout/SPOUTSDK"]
 	path = agent/native/spout/SPOUTSDK
 	url = https://github.com/leadedge/Spout2.git
+[submodule "agent/native/syphon/Syphon-Framework"]
+	path = agent/native/syphon/Syphon-Framework
+	url = https://github.com/Syphon/Syphon-Framework

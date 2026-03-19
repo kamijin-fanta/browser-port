@@ -32,6 +32,8 @@ cargo run
 - `set-output` (`output=spout|syphon|ndi`, `enabled=true|false`)
 - `toggle-output`
 
+On macOS, `spout` is not supported. Use `output=syphon`.
+
 BrowserPort launches the same executable as:
 
 ```powershell
@@ -48,8 +50,44 @@ Runtime dependency notes:
 
 - `spout` (Windows): built from the `leadedge/Spout2` submodule in `agent/native/spout/SPOUTSDK`
   (SDK sources are under `SPOUTSDK/SpoutGL` inside the submodule)
-- `syphon` (macOS): links to Syphon framework (`agent/native/syphon/syphon_bridge.mm`)
+- `syphon` (macOS): uses dynamic Syphon runtime classes via `agent/native/syphon/syphon_bridge.mm`
+  (runtime still requires Syphon framework to be installed)
 - `ndi`: uses Rust `ndi` crate and requires NDI Runtime installed on host
+
+### Embed Syphon.framework (macOS)
+
+Build and embed the framework from submodule:
+
+```bash
+cd agent
+./scripts/embed_syphon_framework.sh
+```
+
+The script copies `Syphon.framework` to:
+
+- `agent/target/debug/Frameworks/Syphon.framework`
+- `agent/target/release/Frameworks/Syphon.framework`
+
+Runtime load override:
+
+- `BROWSER_PORT_SYPHON_FRAMEWORK_PATH=/absolute/path/to/Syphon.framework`
+
+## Output self-check helpers
+
+Platform helper binaries are available for autonomous validation:
+
+- Windows:
+  - `cargo run --bin spout_selftest`
+  - `cargo run --bin spout_probe -- <sender_name> <timeout_sec> <output_path>`
+- macOS:
+  - `cargo run --bin syphon_selftest`
+  - `cargo run --bin syphon_probe -- <server_name> <timeout_sec> <output_path>`
+
+Unified entrypoint:
+
+- `cargo run --bin output_selfcheck`
+
+`output_selfcheck` exits non-zero on failure, so it is suitable for coding-agent or CI smoke checks.
 
 ## Installer scaffolding
 

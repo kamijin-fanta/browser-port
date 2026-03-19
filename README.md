@@ -8,12 +8,20 @@ This directory is the standalone BrowserPort repo.
 - `extention/`: Chrome extension frontend
 - `agent/native/spout/SPOUTSDK`: `leadedge/Spout2` submodule
 - `agent/native/spout/SPOUTSDK/SPOUTSDK/SpoutGL`: Spout SDK source used by the Rust bridge
+- `agent/native/syphon/Syphon-Framework`: `Syphon/Syphon-Framework` submodule (vendor reference)
+- `agent/native/syphon/syphon_bridge.mm`: Syphon sender/client bridge used on macOS
 
 ## Run the relay
 
 ```powershell
 cd agent
 cargo run
+```
+
+On macOS, build/embed `Syphon.framework` once before running self-check helpers:
+
+```bash
+./scripts/embed_syphon_framework.sh
 ```
 
 Optional bind override:
