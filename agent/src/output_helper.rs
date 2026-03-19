@@ -4838,31 +4838,9 @@ impl OutputBackend {
             return VideoSendResult::not_sent();
         }
         if let Some(pixel_buffer) = frame.cv_pixel_buffer.as_ref() {
-            let Some(texture_cache) = self.ensure_syphon_texture_cache(player_id, sender) else {
-                return VideoSendResult::not_sent();
+            let sent = unsafe {
+                browser_port_syphon_send_cv_pixel_buffer(sender, pixel_buffer.as_raw())
             };
-            let Some(texture) = (unsafe {
-                texture_cache.create_texture_from_image(pixel_buffer.as_raw(), width, height)
-            }) else {
-                let native_reason = unsafe {
-                    let ptr = browser_port_syphon_last_error();
-                    if ptr.is_null() {
-                        None
-                    } else {
-                        CStr::from_ptr(ptr).to_str().ok()
-                    }
-                };
-                eprintln!(
-                    "output-helper: syphon texture cache failed player={} size={}x{} reason={}",
-                    player_id,
-                    width,
-                    height,
-                    native_reason.unwrap_or("(none)")
-                );
-                return VideoSendResult::not_sent();
-            };
-            let sent =
-                unsafe { browser_port_syphon_send_metal_texture(sender, texture.as_mtl_texture()) };
             if !sent {
                 let native_reason = unsafe {
                     let ptr = browser_port_syphon_last_error();
@@ -4880,9 +4858,6 @@ impl OutputBackend {
                     native_reason.unwrap_or("(none)")
                 );
                 return VideoSendResult::not_sent();
-            }
-            unsafe {
-                CVMetalTextureCacheFlush(texture_cache.raw, 0);
             }
             return VideoSendResult {
                 sent,
@@ -5188,6 +5163,10 @@ unsafe extern "C" {
     fn browser_port_syphon_send_metal_texture(
         sender: *mut BrowserPortSyphonSender,
         texture: *mut std::ffi::c_void,
+    ) -> bool;
+    fn browser_port_syphon_send_cv_pixel_buffer(
+        sender: *mut BrowserPortSyphonSender,
+        pixel_buffer: *mut std::ffi::c_void,
     ) -> bool;
     fn browser_port_syphon_last_error() -> *const c_char;
     fn browser_port_syphon_client_count(sender: *mut BrowserPortSyphonSender) -> usize;

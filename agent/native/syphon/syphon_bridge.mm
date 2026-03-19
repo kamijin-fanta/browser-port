@@ -1,7 +1,11 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
+#import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#include <simd/simd.h>
+
+#include "Syphon-Framework/SyphonServerMetalTypes.h"
 
 #include <mach-o/dyld.h>
 #include <objc/runtime.h>
@@ -88,6 +92,50 @@ void call_objc_void_texture_publish(
         image_region,
         flipped
     );
+}
+
+id<MTLRenderPipelineState> make_nv12_pipeline(id<MTLDevice> device) {
+    Class server_class = NSClassFromString(@"SyphonMetalServer");
+    if (!server_class) {
+        set_error("SyphonMetalServer class is not available");
+        return nil;
+    }
+
+    NSBundle *bundle = [NSBundle bundleForClass:server_class];
+    NSError *error = nil;
+    id<MTLLibrary> defaultLibrary = [device newDefaultLibraryWithBundle:bundle error:&error];
+    if (!defaultLibrary) {
+        if (error) {
+            set_error([[error localizedDescription] UTF8String]);
+        } else {
+            set_error("failed to load Syphon Metal library");
+        }
+        return nil;
+    }
+
+    id<MTLFunction> vertexFunction = [defaultLibrary newFunctionWithName:@"textureToScreenVertexShader"];
+    id<MTLFunction> fragmentFunction = [defaultLibrary newFunctionWithName:@"nv12ToBgraSamplingShader"];
+    if (!vertexFunction || !fragmentFunction) {
+        set_error("NV12 shader functions are unavailable");
+        return nil;
+    }
+
+    MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.label = @"Syphon NV12 Conversion Pipeline";
+    descriptor.vertexFunction = vertexFunction;
+    descriptor.fragmentFunction = fragmentFunction;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!pipeline) {
+        if (error) {
+            set_error([[error localizedDescription] UTF8String]);
+        } else {
+            set_error("failed to create NV12 conversion pipeline");
+        }
+        return nil;
+    }
+    return pipeline;
 }
 
 NSArray *matching_servers(NSString *server_name) {
@@ -231,6 +279,8 @@ struct BrowserPortSyphonSender {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLTexture> texture;
+    id<MTLRenderPipelineState> nv12Pipeline;
+    CVMetalTextureCacheRef textureCache;
     uint32_t width;
     uint32_t height;
 };
@@ -242,6 +292,49 @@ struct BrowserPortSyphonClient {
     uint32_t width;
     uint32_t height;
 };
+
+bool publish_texture_to_syphon(
+    BrowserPortSyphonSender *state,
+    id<MTLTexture> texture,
+    id<MTLCommandBuffer> command_buffer
+) {
+    if (!state || !state->server || !state->queue) {
+        set_error("invalid syphon sender state");
+        return false;
+    }
+    if (!texture || !command_buffer) {
+        set_error("invalid Metal publish payload");
+        return false;
+    }
+
+    SEL publish_frame_selector =
+        sel_registerName("publishFrameTexture:onCommandBuffer:imageRegion:flipped:");
+    if (![state->server respondsToSelector:publish_frame_selector]) {
+        set_error("Syphon server publishFrameTexture API is unavailable");
+        return false;
+    }
+
+    NSRect image_rect = NSMakeRect(0.0, 0.0, static_cast<CGFloat>(texture.width), static_cast<CGFloat>(texture.height));
+    call_objc_void_texture_publish(
+        state->server,
+        publish_frame_selector,
+        texture,
+        command_buffer,
+        image_rect,
+        YES
+    );
+
+    [command_buffer commit];
+
+    SEL publish_selector = sel_registerName("publish");
+    if ([state->server respondsToSelector:publish_selector]) {
+        call_objc_void(state->server, publish_selector);
+    }
+    pump_runloop_once();
+
+    clear_error();
+    return true;
+}
 
 const char *browser_port_syphon_last_error() {
     return g_last_error.empty() ? nullptr : g_last_error.c_str();
@@ -313,6 +406,27 @@ BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
             return nullptr;
         }
 
+        CVReturn cache_status = CVMetalTextureCacheCreate(
+            kCFAllocatorDefault,
+            nullptr,
+            state->device,
+            nullptr,
+            &state->textureCache
+        );
+        if (cache_status != kCVReturnSuccess || !state->textureCache) {
+            delete state;
+            set_error("failed to create CVMetalTextureCache");
+            return nullptr;
+        }
+
+        state->nv12Pipeline = make_nv12_pipeline(state->device);
+        if (!state->nv12Pipeline) {
+            CFRelease(state->textureCache);
+            state->textureCache = nullptr;
+            delete state;
+            return nullptr;
+        }
+
         state->texture = nil;
         state->width = 0;
         state->height = 0;
@@ -375,6 +489,7 @@ static bool browser_port_syphon_ensure_texture(BrowserPortSyphonSender *state, u
                                                            width:width
                                                           height:height
                                                        mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     state->texture = [state->device newTextureWithDescriptor:descriptor];
     if (!state->texture) {
         return false;
@@ -418,33 +533,7 @@ bool browser_port_syphon_send_bgra(
             return false;
         }
 
-        SEL publish_frame_selector =
-            sel_registerName("publishFrameTexture:onCommandBuffer:imageRegion:flipped:");
-        if (![state->server respondsToSelector:publish_frame_selector]) {
-            set_error("Syphon server publishFrameTexture API is unavailable");
-            return false;
-        }
-
-        NSRect image_rect = NSMakeRect(0.0, 0.0, static_cast<CGFloat>(width), static_cast<CGFloat>(height));
-        call_objc_void_texture_publish(
-            state->server,
-            publish_frame_selector,
-            state->texture,
-            command_buffer,
-            image_rect,
-            YES
-        );
-
-        [command_buffer commit];
-
-        SEL publish_selector = sel_registerName("publish");
-        if ([state->server respondsToSelector:publish_selector]) {
-            call_objc_void(state->server, publish_selector);
-        }
-        pump_runloop_once();
-
-        clear_error();
-        return true;
+        return publish_texture_to_syphon(state, state->texture, command_buffer);
     }
 }
 
@@ -468,33 +557,159 @@ bool browser_port_syphon_send_metal_texture(
             return false;
         }
 
-        SEL publish_frame_selector =
-            sel_registerName("publishFrameTexture:onCommandBuffer:imageRegion:flipped:");
-        if (![state->server respondsToSelector:publish_frame_selector]) {
-            set_error("Syphon server publishFrameTexture API is unavailable");
+        return publish_texture_to_syphon(state, texture, command_buffer);
+    }
+}
+
+bool browser_port_syphon_send_cv_pixel_buffer(
+    BrowserPortSyphonSender *state,
+    CVPixelBufferRef pixel_buffer
+) {
+    @autoreleasepool {
+        if (!state || !state->server || !state->queue || !pixel_buffer) {
+            set_error("invalid syphon sender state");
             return false;
         }
 
-        NSRect image_rect = NSMakeRect(0.0, 0.0, static_cast<CGFloat>(texture.width), static_cast<CGFloat>(texture.height));
-        call_objc_void_texture_publish(
-            state->server,
-            publish_frame_selector,
-            texture,
-            command_buffer,
-            image_rect,
-            YES
-        );
-
-        [command_buffer commit];
-
-        SEL publish_selector = sel_registerName("publish");
-        if ([state->server respondsToSelector:publish_selector]) {
-            call_objc_void(state->server, publish_selector);
+        const OSType pixel_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
+        const uint32_t width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
+        const uint32_t height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
+        if (width == 0 || height == 0) {
+            set_error("invalid pixel buffer size");
+            return false;
         }
-        pump_runloop_once();
+        if (!browser_port_syphon_ensure_texture(state, width, height)) {
+            set_error("failed to allocate sender texture");
+            return false;
+        }
 
-        clear_error();
-        return true;
+        id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
+        if (!command_buffer) {
+            set_error("failed to create command buffer");
+            return false;
+        }
+
+        if (pixel_format == kCVPixelFormatType_32BGRA) {
+            CVMetalTextureRef source_texture_ref = nullptr;
+            CVReturn status = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault,
+                state->textureCache,
+                pixel_buffer,
+                nullptr,
+                MTLPixelFormatBGRA8Unorm,
+                width,
+                height,
+                0,
+                &source_texture_ref
+            );
+            if (status != kCVReturnSuccess || !source_texture_ref) {
+                set_error("failed to create BGRA Metal texture");
+                return false;
+            }
+            id<MTLTexture> source_texture = CVMetalTextureGetTexture(source_texture_ref);
+            bool sent = source_texture ? publish_texture_to_syphon(state, source_texture, command_buffer) : false;
+            CFRelease(source_texture_ref);
+            CVMetalTextureCacheFlush(state->textureCache, 0);
+            return sent;
+        }
+
+        if (pixel_format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange &&
+            pixel_format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+            set_error("unsupported pixel buffer format");
+            return false;
+        }
+        if (!state->nv12Pipeline) {
+            set_error("NV12 conversion pipeline is unavailable");
+            return false;
+        }
+
+        CVMetalTextureRef y_texture_ref = nullptr;
+        CVMetalTextureRef uv_texture_ref = nullptr;
+        const size_t y_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
+        const size_t y_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
+        const size_t uv_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, 1);
+        const size_t uv_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
+        CVReturn status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            state->textureCache,
+            pixel_buffer,
+            nullptr,
+            MTLPixelFormatR8Unorm,
+            y_width,
+            y_height,
+            0,
+            &y_texture_ref
+        );
+        if (status != kCVReturnSuccess || !y_texture_ref) {
+            set_error("failed to create NV12 luma texture");
+            return false;
+        }
+        status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            state->textureCache,
+            pixel_buffer,
+            nullptr,
+            MTLPixelFormatRG8Unorm,
+            uv_width,
+            uv_height,
+            1,
+            &uv_texture_ref
+        );
+        if (status != kCVReturnSuccess || !uv_texture_ref) {
+            CFRelease(y_texture_ref);
+            set_error("failed to create NV12 chroma texture");
+            return false;
+        }
+
+        id<MTLTexture> y_texture = CVMetalTextureGetTexture(y_texture_ref);
+        id<MTLTexture> uv_texture = CVMetalTextureGetTexture(uv_texture_ref);
+        if (!y_texture || !uv_texture) {
+            CFRelease(y_texture_ref);
+            CFRelease(uv_texture_ref);
+            set_error("failed to resolve NV12 Metal textures");
+            return false;
+        }
+
+        MTLRenderPassDescriptor *render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        render_pass.colorAttachments[0].texture = state->texture;
+        render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+        id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:render_pass];
+        if (!encoder) {
+            CFRelease(y_texture_ref);
+            CFRelease(uv_texture_ref);
+            set_error("failed to create render encoder");
+            return false;
+        }
+
+        const float w = static_cast<float>(width) / 2.0f;
+        const float h = static_cast<float>(height) / 2.0f;
+        const float flip_value = 1.0f;
+        const SYPHONTextureVertex quadVertices[] = {
+            { {  w,   flip_value * h },  { 1.f, 1.f } },
+            { { -w,   flip_value * h },  { 0.f, 1.f } },
+            { { -w,  flip_value * -h },  { 0.f, 0.f } },
+            { {  w,  flip_value * h },   { 1.f, 1.f } },
+            { { -w,  flip_value * -h },  { 0.f, 0.f } },
+            { {  w,  flip_value * -h },  { 1.f, 0.f } },
+        };
+        const vector_uint2 viewportSize = { width, height };
+        [encoder setRenderPipelineState:state->nv12Pipeline];
+        [encoder setViewport:(MTLViewport){0.0, 0.0, (double)width, (double)height, -1.0, 1.0}];
+        [encoder setVertexBytes:quadVertices length:sizeof(quadVertices) atIndex:SYPHONVertexInputIndexVertices];
+        [encoder setVertexBytes:&viewportSize length:sizeof(viewportSize) atIndex:SYPHONVertexInputIndexViewportSize];
+        [encoder setFragmentTexture:y_texture atIndex:0];
+        [encoder setFragmentTexture:uv_texture atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [encoder endEncoding];
+
+        bool sent = publish_texture_to_syphon(state, state->texture, command_buffer);
+        CFRelease(y_texture_ref);
+        CFRelease(uv_texture_ref);
+        CVMetalTextureCacheFlush(state->textureCache, 0);
+        return sent;
     }
 }
 
@@ -511,6 +726,11 @@ void browser_port_syphon_destroy_sender(BrowserPortSyphonSender *state) {
             state->server = nil;
         }
         state->texture = nil;
+        state->nv12Pipeline = nil;
+        if (state->textureCache) {
+            CFRelease(state->textureCache);
+            state->textureCache = nullptr;
+        }
         state->queue = nil;
         state->device = nil;
         delete state;
