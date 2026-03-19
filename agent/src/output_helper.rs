@@ -830,10 +830,6 @@ impl VideoSendResult {
 #[cfg(target_os = "macos")]
 type CVPixelBufferRef = *mut std::ffi::c_void;
 #[cfg(target_os = "macos")]
-type CVMetalTextureCacheRef = *mut std::ffi::c_void;
-#[cfg(target_os = "macos")]
-type CVMetalTextureRef = *mut std::ffi::c_void;
-#[cfg(target_os = "macos")]
 type CFTypeRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type CFAllocatorRef = *const std::ffi::c_void;
@@ -854,26 +850,6 @@ extern "C" {
     fn CVPixelBufferGetHeight(pixel_buffer: CVPixelBufferRef) -> usize;
     fn CVPixelBufferGetIOSurface(pixel_buffer: CVPixelBufferRef) -> *mut std::ffi::c_void;
     fn CVPixelBufferRelease(pixel_buffer: CVPixelBufferRef);
-    fn CVMetalTextureCacheCreate(
-        allocator: CFAllocatorRef,
-        cache_attributes: *const std::ffi::c_void,
-        device: id,
-        texture_attributes: *const std::ffi::c_void,
-        cache_out: *mut CVMetalTextureCacheRef,
-    ) -> OSStatus;
-    fn CVMetalTextureCacheCreateTextureFromImage(
-        allocator: CFAllocatorRef,
-        texture_cache: CVMetalTextureCacheRef,
-        source_image: CVPixelBufferRef,
-        texture_attributes: *const std::ffi::c_void,
-        pixel_format: u64,
-        width: usize,
-        height: usize,
-        plane_index: usize,
-        texture_out: *mut CVMetalTextureRef,
-    ) -> OSStatus;
-    fn CVMetalTextureGetTexture(texture: CVMetalTextureRef) -> *mut std::ffi::c_void;
-    fn CVMetalTextureCacheFlush(texture_cache: CVMetalTextureCacheRef, options: u64);
 }
 
 #[cfg(target_os = "macos")]
@@ -953,8 +929,6 @@ struct CMSampleTimingInfo {
 }
 
 #[cfg(target_os = "macos")]
-const MTLPixelFormat_BGRA8UNorm: u64 = 80;
-#[cfg(target_os = "macos")]
 const KCV_PIXELFORMAT_32_BGRA: u32 = 0x4247_5241;
 
 #[cfg(target_os = "macos")]
@@ -1001,83 +975,6 @@ impl Drop for CvPixelBufferHandle {
     fn drop(&mut self) {
         unsafe {
             CVPixelBufferRelease(self.raw);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-struct CvMetalTextureCacheHandle {
-    raw: CVMetalTextureCacheRef,
-}
-
-#[cfg(target_os = "macos")]
-impl CvMetalTextureCacheHandle {
-    unsafe fn create(device: id) -> Option<Self> {
-        let mut cache: CVMetalTextureCacheRef = std::ptr::null_mut();
-        let status = CVMetalTextureCacheCreate(
-            std::ptr::null(),
-            std::ptr::null(),
-            device,
-            std::ptr::null(),
-            &mut cache,
-        );
-        if status != 0 || cache.is_null() {
-            return None;
-        }
-        Some(Self { raw: cache })
-    }
-
-    unsafe fn create_texture_from_image(
-        &self,
-        pixel_buffer: CVPixelBufferRef,
-        width: usize,
-        height: usize,
-    ) -> Option<CvMetalTextureHandle> {
-        let mut texture_ref: CVMetalTextureRef = std::ptr::null_mut();
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            std::ptr::null(),
-            self.raw,
-            pixel_buffer,
-            std::ptr::null(),
-            MTLPixelFormat_BGRA8UNorm,
-            width,
-            height,
-            0,
-            &mut texture_ref,
-        );
-        if status != 0 || texture_ref.is_null() {
-            return None;
-        }
-        Some(CvMetalTextureHandle { raw: texture_ref })
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for CvMetalTextureCacheHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CFRelease(self.raw as CFTypeRef);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-struct CvMetalTextureHandle {
-    raw: CVMetalTextureRef,
-}
-
-#[cfg(target_os = "macos")]
-impl CvMetalTextureHandle {
-    fn as_mtl_texture(&self) -> *mut std::ffi::c_void {
-        unsafe { CVMetalTextureGetTexture(self.raw) }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for CvMetalTextureHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CFRelease(self.raw as CFTypeRef);
         }
     }
 }
@@ -4299,8 +4196,6 @@ struct OutputBackend {
     spout_dimensions: HashMap<u32, (usize, usize)>,
     #[cfg(target_os = "macos")]
     syphon: HashMap<u32, *mut BrowserPortSyphonSender>,
-    #[cfg(target_os = "macos")]
-    syphon_caches: HashMap<u32, CvMetalTextureCacheHandle>,
     ndi: Option<NdiState>,
 }
 
@@ -4332,7 +4227,6 @@ impl OutputBackend {
                     Ok(Self {
                         mode,
                         syphon: HashMap::new(),
-                        syphon_caches: HashMap::new(),
                         ndi: None,
                     })
                 }
@@ -4360,8 +4254,6 @@ impl OutputBackend {
                         spout_dimensions: HashMap::new(),
                         #[cfg(target_os = "macos")]
                         syphon: HashMap::new(),
-                        #[cfg(target_os = "macos")]
-                        syphon_caches: HashMap::new(),
                         ndi: Some(NdiState::new().context("failed to init ndi state")?),
                     })
                 }
@@ -4467,7 +4359,6 @@ impl OutputBackend {
                             unsafe { browser_port_syphon_destroy_sender(sender) };
                         }
                     }
-                    self.syphon_caches.remove(&player_id);
                 }
             }
             OutputMode::Ndi => {}
@@ -4906,23 +4797,6 @@ impl OutputBackend {
     }
 
     #[cfg(target_os = "macos")]
-    fn ensure_syphon_texture_cache(
-        &mut self,
-        player_id: u32,
-        sender: *mut BrowserPortSyphonSender,
-    ) -> Option<&mut CvMetalTextureCacheHandle> {
-        if !self.syphon_caches.contains_key(&player_id) {
-            let device = unsafe { browser_port_syphon_sender_device(sender) };
-            if device.is_null() {
-                return None;
-            }
-            let cache = unsafe { CvMetalTextureCacheHandle::create(device as id) }?;
-            self.syphon_caches.insert(player_id, cache);
-        }
-        self.syphon_caches.get_mut(&player_id)
-    }
-
-    #[cfg(target_os = "macos")]
     fn syphon_client_count(&self) -> usize {
         self.syphon
             .values()
@@ -4956,7 +4830,6 @@ impl Drop for OutputBackend {
                 unsafe { browser_port_syphon_destroy_sender(*sender) };
             }
             self.syphon.clear();
-            self.syphon_caches.clear();
         }
     }
 }
@@ -5160,18 +5033,11 @@ unsafe extern "C" {
         width: u32,
         height: u32,
     ) -> bool;
-    fn browser_port_syphon_send_metal_texture(
-        sender: *mut BrowserPortSyphonSender,
-        texture: *mut std::ffi::c_void,
-    ) -> bool;
     fn browser_port_syphon_send_cv_pixel_buffer(
         sender: *mut BrowserPortSyphonSender,
         pixel_buffer: *mut std::ffi::c_void,
     ) -> bool;
     fn browser_port_syphon_last_error() -> *const c_char;
     fn browser_port_syphon_client_count(sender: *mut BrowserPortSyphonSender) -> usize;
-    fn browser_port_syphon_sender_device(
-        sender: *mut BrowserPortSyphonSender,
-    ) -> *mut std::ffi::c_void;
     fn browser_port_syphon_destroy_sender(sender: *mut BrowserPortSyphonSender);
 }

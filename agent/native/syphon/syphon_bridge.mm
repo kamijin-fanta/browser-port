@@ -467,15 +467,6 @@ size_t browser_port_syphon_client_count(BrowserPortSyphonSender *state) {
     }
 }
 
-void *browser_port_syphon_sender_device(BrowserPortSyphonSender *state) {
-    @autoreleasepool {
-        if (!state || !state->device) {
-            return nullptr;
-        }
-        return (__bridge void *)state->device;
-    }
-}
-
 static bool browser_port_syphon_ensure_texture(BrowserPortSyphonSender *state, uint32_t width, uint32_t height) {
     if (!state || !state->device || width == 0 || height == 0) {
         return false;
@@ -534,30 +525,6 @@ bool browser_port_syphon_send_bgra(
         }
 
         return publish_texture_to_syphon(state, state->texture, command_buffer);
-    }
-}
-
-bool browser_port_syphon_send_metal_texture(
-    BrowserPortSyphonSender *state,
-    id<MTLTexture> texture
-) {
-    @autoreleasepool {
-        if (!state || !state->server || !state->queue) {
-            set_error("invalid syphon sender state");
-            return false;
-        }
-        if (!texture) {
-            set_error("invalid Metal texture payload");
-            return false;
-        }
-
-        id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
-        if (!command_buffer) {
-            set_error("failed to create command buffer");
-            return false;
-        }
-
-        return publish_texture_to_syphon(state, texture, command_buffer);
     }
 }
 

@@ -66,7 +66,14 @@ fn build_macos_syphon() {
     build.flag("-fobjc-arc");
     build.compile("browser_port_syphon_bridge");
 
-    for framework in ["Foundation", "AppKit", "QuartzCore", "Metal", "OpenGL"] {
+    for framework in [
+        "Foundation",
+        "AppKit",
+        "QuartzCore",
+        "CoreMedia",
+        "Metal",
+        "OpenGL",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
 }
