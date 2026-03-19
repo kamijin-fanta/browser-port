@@ -18,6 +18,9 @@ cd agent
 cargo run
 ```
 
+On macOS, launching the bundled `.app` opens BrowserPort as a menu bar app.
+The tray shows player count, Syphon client count, WS address, and a quit action.
+
 Optional bind override:
 
 ```powershell
@@ -93,5 +96,6 @@ Unified entrypoint:
 
 - Windows MSI script: `installer/windows/build-msi.ps1`
 - macOS PKG script: `installer/macos/build-pkg.sh`
+- macOS DMG script: `installer/macos/build-dmg.sh`
 
 These scripts are unsigned defaults for local/internal distribution.

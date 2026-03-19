@@ -24,6 +24,12 @@ On macOS, build/embed `Syphon.framework` once before running self-check helpers:
 ./scripts/embed_syphon_framework.sh
 ```
 
+To build a distributable macOS DMG with the menu bar app bundle:
+
+```bash
+./installer/macos/build-dmg.sh
+```
+
 Optional bind override:
 
 ```powershell

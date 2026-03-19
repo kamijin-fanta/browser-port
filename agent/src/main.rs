@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
@@ -15,6 +15,9 @@ use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
 
 mod output_helper;
+
+#[cfg(target_os = "macos")]
+mod macos_menu;
 
 type ConnId = u64;
 
@@ -114,6 +117,7 @@ struct SharedState {
     player_routes: HashMap<u32, ConnId>,
     player_streams: HashMap<u32, PlayerStreamState>,
     player_configs: HashMap<u32, Value>,
+    syphon_client_count: usize,
     outputs: OutputFlags,
     output_availability: OutputAvailability,
 }
@@ -186,6 +190,10 @@ impl SharedState {
             }
         }
         (ext_count, client_count)
+    }
+
+    fn set_syphon_client_count(&mut self, count: usize) {
+        self.syphon_client_count = count;
     }
 
     fn update_stream_config(&mut self, player_id: u32, message: &Value) {
@@ -387,21 +395,9 @@ struct HelperPlayerPerf {
     frame_non_black_ratio: Option<f64>,
 }
 
-struct TrayHandle {
-    join: Option<JoinHandle<()>>,
-}
-
 struct HandshakeInfo {
     role: Role,
     source: Option<String>,
-}
-
-impl Drop for TrayHandle {
-    fn drop(&mut self) {
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
 }
 
 struct OutputProcessManager {
@@ -600,15 +596,89 @@ impl Drop for OutputProcessManager {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     if let Some(helper_args) = output_helper::parse_from_env()? {
-        return output_helper::run(helper_args).await;
+        let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+        return rt.block_on(output_helper::run(helper_args));
     }
-    run_browser_port().await
+
+    if should_launch_menu_bar_app() {
+        return run_menu_bar_app();
+    }
+
+    run_headless_browser_port()
 }
 
-async fn run_browser_port() -> anyhow::Result<()> {
+fn should_launch_menu_bar_app() -> bool {
+    if env::var("BROWSER_PORT_HEADLESS")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if env::var("BROWSER_PORT_TRAY")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return true;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+fn run_headless_browser_port() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let state = Arc::new(RwLock::new(SharedState::default()));
+    rt.block_on(run_browser_port(
+        Arc::clone(&state),
+        Arc::new(AtomicBool::new(false)),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn run_menu_bar_app() -> anyhow::Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(RwLock::new(SharedState::default()));
+    let bind_addr =
+        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
+    eprintln!("BrowserPort starting macOS menu bar app on ws://{}", bind_addr);
+    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let handle = runtime.handle().clone();
+    let rt_stop = Arc::clone(&stop);
+    let rt_state = Arc::clone(&state);
+    let runtime_thread = thread::spawn(move || {
+        if let Err(err) = runtime.block_on(run_browser_port(rt_state, rt_stop)) {
+            eprintln!("browser-port server exited with error: {err}");
+        }
+    });
+    let result = macos_menu::run_menu_bar_app(state, bind_addr, stop.clone(), handle);
+    stop.store(true, Ordering::Relaxed);
+    let _ = runtime_thread.join();
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_menu_bar_app() -> anyhow::Result<()> {
+    run_headless_browser_port()
+}
+
+async fn run_browser_port(
+    state: Arc<RwLock<SharedState>>,
+    stop: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let bind_addr =
         env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
     let spout_fastpath_watchdog_enabled = env::var("BROWSER_PORT_SPOUT_FASTPATH_WATCHDOG")
@@ -621,10 +691,8 @@ async fn run_browser_port() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {}", bind_addr))?;
     println!("BrowserPort listening on ws://{}", bind_addr);
 
-    let state = Arc::new(RwLock::new(SharedState::default()));
     let output_manager = Arc::new(Mutex::new(OutputProcessManager::new(&bind_addr)));
     let next_id = Arc::new(AtomicU64::new(1));
-    let stop = Arc::new(AtomicBool::new(false));
     {
         let stop_ref = Arc::clone(&stop);
         tokio::spawn(async move {
@@ -633,13 +701,6 @@ async fn run_browser_port() -> anyhow::Result<()> {
             }
         });
     }
-    let rt_handle = tokio::runtime::Handle::current();
-    let _tray = start_tray_ui(
-        Arc::clone(&state),
-        Arc::clone(&stop),
-        bind_addr.clone(),
-        rt_handle.clone(),
-    );
     {
         let outputs = {
             let lock = state.read().await;
@@ -1204,18 +1265,27 @@ async fn handle_browser_port_control(
 }
 
 async fn handle_helper_stats(state: &Arc<RwLock<SharedState>>, value: &Value, bind_addr: &str) {
+    let syphon_client_count = value
+        .get("syphonClientCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok());
     let Some(players) = value.get("players").and_then(Value::as_array) else {
+        if let Some(count) = syphon_client_count {
+            let mut lock = state.write().await;
+            lock.set_syphon_client_count(count);
+        }
+        broadcast_browser_port_stats(state, bind_addr).await;
         return;
     };
     let perf_list = players
         .iter()
         .filter_map(parse_helper_player_perf)
         .collect::<Vec<_>>();
-    if perf_list.is_empty() {
-        return;
-    }
     {
         let mut lock = state.write().await;
+        if let Some(count) = syphon_client_count {
+            lock.set_syphon_client_count(count);
+        }
         for perf in &perf_list {
             lock.update_helper_perf(perf);
         }
@@ -1426,6 +1496,7 @@ async fn build_browser_port_stats_payload(
         client_count,
         output_flags,
         output_availability,
+        syphon_client_count,
         mut player_streams,
         players_registered,
     ) = {
@@ -1441,6 +1512,7 @@ async fn build_browser_port_stats_payload(
             client_count,
             lock.outputs.clone(),
             lock.output_availability.clone(),
+            lock.syphon_client_count,
             player_streams,
             lock.player_routes.len(),
         )
@@ -1517,6 +1589,7 @@ async fn build_browser_port_stats_payload(
         "extensions": ext_count,
         "clients": client_count,
         "playersRegistered": players_registered,
+        "syphonClientCount": syphon_client_count,
         "outputs": outputs,
         "players": players,
     })
@@ -1591,53 +1664,4 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
-}
-
-fn start_tray_ui(
-    state: Arc<RwLock<SharedState>>,
-    stop: Arc<AtomicBool>,
-    bind_addr: String,
-    rt_handle: tokio::runtime::Handle,
-) -> TrayHandle {
-    let _icon = make_tray_icon();
-    let join = thread::spawn(move || {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        eprintln!("tray UI placeholder active (status/control via browser-port-control)");
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        eprintln!("tray UI is not available on this platform");
-
-        let mut tick = 0_u64;
-        while !stop.load(Ordering::Relaxed) {
-            thread::sleep(StdDuration::from_secs(5));
-            tick = tick.saturating_add(1);
-            if tick % 3 != 0 {
-                continue;
-            }
-            let (extensions, clients, players_registered, outputs) = rt_handle.block_on(async {
-                let lock = state.read().await;
-                let (extensions, clients) = lock.counts();
-                (
-                    extensions,
-                    clients,
-                    lock.player_routes.len(),
-                    lock.outputs.clone(),
-                )
-            });
-            eprintln!(
-                "BrowserPort status bind={} ext={} client={} players={} ndi={} spout={} syphon={}",
-                bind_addr,
-                extensions,
-                clients,
-                players_registered,
-                outputs.ndi_enabled,
-                outputs.spout_enabled,
-                outputs.syphon_enabled
-            );
-        }
-    });
-    TrayHandle { join: Some(join) }
-}
-
-fn make_tray_icon() -> Vec<u8> {
-    vec![255, 255, 255, 255]
 }

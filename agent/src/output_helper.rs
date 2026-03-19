@@ -318,7 +318,14 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
             backend.tick();
 
             if last_stats_at.elapsed() >= HELPER_STATS_INTERVAL {
-                send_helper_stats(&mut ws, args.mode, &decoders, perf_config.verbose).await;
+                send_helper_stats(
+                    &mut ws,
+                    args.mode,
+                    &decoders,
+                    backend.syphon_client_count(),
+                    perf_config.verbose,
+                )
+                .await;
                 last_stats_at = Instant::now();
             }
         }
@@ -518,13 +525,11 @@ async fn send_helper_stats<S>(
     ws: &mut S,
     mode: OutputMode,
     decoders: &HashMap<u32, DecoderState>,
+    syphon_client_count: usize,
     verbose: bool,
 ) where
     S: futures_util::sink::Sink<Message> + Unpin,
 {
-    if decoders.is_empty() {
-        return;
-    }
     let mut players = Vec::with_capacity(decoders.len());
     for (player_id, decoder) in decoders {
         let perf = decoder.perf_metrics();
@@ -573,6 +578,7 @@ async fn send_helper_stats<S>(
         "type": "helper-stats",
         "source": "output-helper",
         "mode": mode.as_str(),
+        "syphonClientCount": syphon_client_count,
         "players": players,
     });
     let _ = ws.send(Message::Text(payload.to_string().into())).await;
@@ -4140,6 +4146,19 @@ impl OutputBackend {
             texture_failed: false,
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn syphon_client_count(&self) -> usize {
+        self.syphon
+            .values()
+            .map(|sender| unsafe { browser_port_syphon_client_count(*sender) as usize })
+            .sum()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn syphon_client_count(&self) -> usize {
+        0
+    }
 }
 
 impl Drop for OutputBackend {
@@ -4366,5 +4385,6 @@ unsafe extern "C" {
         height: u32,
     ) -> bool;
     fn browser_port_syphon_last_error() -> *const c_char;
+    fn browser_port_syphon_client_count(sender: *mut BrowserPortSyphonSender) -> usize;
     fn browser_port_syphon_destroy_sender(sender: *mut BrowserPortSyphonSender);
 }

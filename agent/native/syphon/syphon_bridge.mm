@@ -4,6 +4,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <mach-o/dyld.h>
+#include <objc/runtime.h>
 #include <objc/message.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -317,6 +318,38 @@ BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
         state->height = 0;
         clear_error();
         return state;
+    }
+}
+
+size_t browser_port_syphon_client_count(BrowserPortSyphonSender *state) {
+    @autoreleasepool {
+        if (!state || !state->server) {
+            return 0;
+        }
+        Class base_class = NSClassFromString(@"SyphonServerBase");
+        Class manager_class = NSClassFromString(@"SyphonServerConnectionManager");
+        if (!base_class || !manager_class) {
+            return 0;
+        }
+
+        Ivar connection_manager_ivar = class_getInstanceVariable(base_class, "_connectionManager");
+        if (!connection_manager_ivar) {
+            return 0;
+        }
+        id manager = object_getIvar(state->server, connection_manager_ivar);
+        if (!manager) {
+            return 0;
+        }
+
+        Ivar info_clients_ivar = class_getInstanceVariable(manager_class, "_infoClients");
+        if (!info_clients_ivar) {
+            return 0;
+        }
+        id info_clients = object_getIvar(manager, info_clients_ivar);
+        if (!info_clients || ![info_clients respondsToSelector:@selector(count)]) {
+            return 0;
+        }
+        return [info_clients count];
     }
 }
 

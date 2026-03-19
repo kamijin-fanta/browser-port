@@ -15,6 +15,10 @@ openh264 = "0.9.3"
 [build-dependencies]
 cc = "1.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 ndi = "0.1.2"
 
