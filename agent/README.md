@@ -19,7 +19,8 @@ cargo run
 ```
 
 On macOS, launching the bundled `.app` opens BrowserPort as a menu bar app.
-The tray shows player count, Syphon client count, WS address, and a quit action.
+On Windows, `cargo run` starts BrowserPort as a task tray app by default.
+The tray menu shows player count, Syphon client count, WS address, and a quit action.
 
 Optional bind override:
 

@@ -18,6 +18,8 @@ mod output_helper;
 
 #[cfg(target_os = "macos")]
 mod macos_menu;
+#[cfg(target_os = "windows")]
+mod windows_tray;
 
 type ConnId = u64;
 
@@ -630,12 +632,12 @@ fn should_launch_menu_bar_app() -> bool {
         return true;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         return true;
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -675,7 +677,32 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn run_menu_bar_app() -> anyhow::Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(RwLock::new(SharedState::default()));
+    let bind_addr =
+        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:1844".to_string());
+    eprintln!(
+        "BrowserPort starting Windows tray app on ws://{}",
+        bind_addr
+    );
+    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let handle = runtime.handle().clone();
+    let rt_stop = Arc::clone(&stop);
+    let rt_state = Arc::clone(&state);
+    let runtime_thread = thread::spawn(move || {
+        if let Err(err) = runtime.block_on(run_browser_port(rt_state, rt_stop)) {
+            eprintln!("browser-port server exited with error: {err}");
+        }
+    });
+    let result = windows_tray::run_tray_app(state, bind_addr, stop.clone(), handle);
+    stop.store(true, Ordering::Relaxed);
+    let _ = runtime_thread.join();
+    result
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn run_menu_bar_app() -> anyhow::Result<()> {
     run_headless_browser_port()
 }

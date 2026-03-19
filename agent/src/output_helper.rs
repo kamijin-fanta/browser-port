@@ -1145,7 +1145,6 @@ struct CMSampleTimingInfo {
 #[cfg(target_os = "macos")]
 const KCV_PIXELFORMAT_32_BGRA: u32 = 0x4247_5241;
 
-#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct DecodedFrame {
     width: usize,
@@ -4461,6 +4460,7 @@ impl H264Context {
         true
     }
 
+    #[cfg(target_os = "macos")]
     fn video_toolbox_config(&self) -> Option<VideoToolboxH264Config> {
         if self.parameter_sets.is_empty() {
             return None;
@@ -4722,6 +4722,7 @@ fn best_effort_avcc_to_annexb(payload: &[u8]) -> Option<Vec<u8>> {
         .find_map(|nal_length_size| avcc_to_annexb(payload, *nal_length_size))
 }
 
+#[cfg(target_os = "macos")]
 fn hex_dump_prefix(payload: &[u8], limit: usize) -> String {
     payload
         .iter()
@@ -4731,6 +4732,7 @@ fn hex_dump_prefix(payload: &[u8], limit: usize) -> String {
         .join(" ")
 }
 
+#[cfg(target_os = "macos")]
 fn annexb_to_avcc(payload: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(payload.len() + 32);
     let mut index = 0_usize;
@@ -4775,6 +4777,7 @@ fn annexb_to_avcc(payload: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn vt_prepare_sample_payload(payload: &[u8]) -> Option<Vec<u8>> {
     if payload.is_empty() {
         return None;
@@ -4856,6 +4859,7 @@ fn prepend_parameter_sets(parameter_sets: &[Vec<u8>], payload: &[u8]) -> Vec<u8>
     out
 }
 
+#[cfg(target_os = "macos")]
 fn extract_annexb_parameter_sets(payload: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
     let mut parameter_sets = Vec::new();
     let mut index = 0_usize;
@@ -4967,6 +4971,7 @@ mod tests {
         assert!(normalized.ends_with(&[0, 0, 0, 1, 0x65, 0x88]));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn annexb_payload_converts_to_avcc() {
         let annexb = vec![0, 0, 0, 1, 0x65, 0x88, 0, 0, 1, 0x41, 0x99];
@@ -5025,6 +5030,7 @@ mod tests {
         assert_eq!(h264_nal_types(&avcc, Some(4)), vec![7, 5]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn vt_prepare_accepts_annexb() {
         let annexb = vec![0, 0, 0, 1, 0x65, 0x88];
@@ -5032,6 +5038,7 @@ mod tests {
         assert_eq!(avcc, vec![0, 0, 0, 2, 0x65, 0x88]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn vt_prepare_normalizes_two_byte_avcc_to_four_byte() {
         let two_byte_avcc = vec![0, 2, 0x65, 0x88];
