@@ -33,7 +33,7 @@ To build a distributable macOS DMG with the menu bar app bundle:
 Optional bind override:
 
 ```powershell
-$env:BROWSER_PORT_AGENT_BIND = "127.0.0.1:9876"
+$env:BROWSER_PORT_AGENT_BIND = "127.0.0.1:1844"
 cargo run
 ```
 

@@ -2,7 +2,7 @@
 // Multi-player assignment UI with compact status and overlay settings.
 
 const DEFAULT_SETTINGS = {
-  wsUrl: 'ws://127.0.0.1:9876',
+  wsUrl: 'ws://127.0.0.1:1844',
   bitrate: 30_000_000,
   targetFps: 60,
   maxWidth: 1920,

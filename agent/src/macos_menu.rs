@@ -134,7 +134,7 @@ unsafe fn build_menu(controller: id) -> (id, id, id, id, id) {
 
     let player_item = make_menu_item("Players: 0", false, nil, sel!(refreshMenu:));
     let syphon_item = make_menu_item("Syphon: 0", false, nil, sel!(refreshMenu:));
-    let ws_item = make_menu_item("WS: 127.0.0.1:9876", false, nil, sel!(refreshMenu:));
+    let ws_item = make_menu_item("WS: 127.0.0.1:1844", false, nil, sel!(refreshMenu:));
     let separator: id = msg_send![class!(NSMenuItem), separatorItem];
     let quit_item = make_menu_item("Quit BrowserPort", true, controller, sel!(quit:));
 

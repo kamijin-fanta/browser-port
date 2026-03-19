@@ -653,7 +653,7 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(RwLock::new(SharedState::default()));
     let bind_addr =
-        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
+        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:1844".to_string());
     eprintln!(
         "BrowserPort starting macOS menu bar app on ws://{}",
         bind_addr
@@ -683,7 +683,7 @@ async fn run_browser_port(
     stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let bind_addr =
-        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
+        env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:1844".to_string());
     let spout_fastpath_watchdog_enabled = env::var("BROWSER_PORT_SPOUT_FASTPATH_WATCHDOG")
         .ok()
         .as_deref()

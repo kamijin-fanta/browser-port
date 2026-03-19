@@ -24,7 +24,7 @@ The tray shows player count, Syphon client count, WS address, and a quit action.
 Optional bind override:
 
 ```powershell
-$env:BROWSER_PORT_AGENT_BIND = "127.0.0.1:9876"
+$env:BROWSER_PORT_AGENT_BIND = "127.0.0.1:1844"
 cargo run
 ```
 
@@ -40,7 +40,7 @@ On macOS, `spout` is not supported. Use `output=syphon`.
 BrowserPort launches the same executable as:
 
 ```powershell
-browser-port output-helper --mode <spout|syphon|ndi> --ws ws://127.0.0.1:9876
+browser-port output-helper --mode <spout|syphon|ndi> --ws ws://127.0.0.1:1844
 ```
 
 Override command per output:

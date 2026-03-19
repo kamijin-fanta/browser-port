@@ -199,7 +199,7 @@ pub fn parse_from_env() -> anyhow::Result<Option<OutputHelperArgs>> {
     }
     args.remove(0);
     let mut mode: Option<OutputMode> = None;
-    let mut ws_url = "ws://127.0.0.1:9876".to_string();
+    let mut ws_url = "ws://127.0.0.1:1844".to_string();
     let mut idx = 0;
     while idx < args.len() {
         let key = args[idx].as_str();
