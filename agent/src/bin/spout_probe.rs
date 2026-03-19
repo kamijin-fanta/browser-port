@@ -93,7 +93,12 @@ mod windows_probe {
             }
 
             let received = unsafe {
-                browser_port_spout_receiver_receive_bgra(receiver, buffer.as_mut_ptr(), width, height)
+                browser_port_spout_receiver_receive_bgra(
+                    receiver,
+                    buffer.as_mut_ptr(),
+                    width,
+                    height,
+                )
             };
             let frame_new = unsafe { browser_port_spout_receiver_is_frame_new(receiver) };
 
@@ -181,7 +186,9 @@ mod windows_probe {
         println!("sender_count={count}");
         for index in 0..count {
             let mut buf = vec![0_i8; 256];
-            let ok = unsafe { browser_port_spout_sender_name(index, buf.as_mut_ptr(), buf.len() as i32) };
+            let ok = unsafe {
+                browser_port_spout_sender_name(index, buf.as_mut_ptr(), buf.len() as i32)
+            };
             if ok {
                 let name = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
                 println!("sender[{index}]={name}");
@@ -330,9 +337,14 @@ mod windows_probe {
             share_handle: *mut u64,
             format: *mut u32,
         ) -> bool;
-        fn browser_port_spout_create_receiver(name: *const c_char) -> *mut BrowserPortSpoutReceiver;
-        fn browser_port_spout_receiver_is_connected(receiver: *mut BrowserPortSpoutReceiver) -> bool;
-        fn browser_port_spout_receiver_is_frame_new(receiver: *mut BrowserPortSpoutReceiver) -> bool;
+        fn browser_port_spout_create_receiver(name: *const c_char)
+            -> *mut BrowserPortSpoutReceiver;
+        fn browser_port_spout_receiver_is_connected(
+            receiver: *mut BrowserPortSpoutReceiver,
+        ) -> bool;
+        fn browser_port_spout_receiver_is_frame_new(
+            receiver: *mut BrowserPortSpoutReceiver,
+        ) -> bool;
         fn browser_port_spout_receiver_width(receiver: *mut BrowserPortSpoutReceiver) -> u32;
         fn browser_port_spout_receiver_height(receiver: *mut BrowserPortSpoutReceiver) -> u32;
         fn browser_port_spout_receiver_receive_bgra(

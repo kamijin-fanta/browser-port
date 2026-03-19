@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 mod macos_selftest {
-    use std::ffi::{c_char, CStr, CString};
     use std::env;
+    use std::ffi::{c_char, CStr, CString};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -143,7 +143,10 @@ mod macos_selftest {
         if last_ok.elapsed() <= config.duration {
             return Ok(());
         }
-        Err(format!("timed out without non-black frame (last_error={})", last_error()))
+        Err(format!(
+            "timed out without non-black frame (last_error={})",
+            last_error()
+        ))
     }
 
     impl SelftestConfig {

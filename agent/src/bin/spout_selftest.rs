@@ -40,7 +40,8 @@ mod windows_selftest {
             share_handle: *mut u64,
             format: *mut u32,
         ) -> bool;
-        fn browser_port_spout_create_receiver(name: *const c_char) -> *mut BrowserPortSpoutReceiver;
+        fn browser_port_spout_create_receiver(name: *const c_char)
+            -> *mut BrowserPortSpoutReceiver;
         fn browser_port_spout_receiver_width(receiver: *mut BrowserPortSpoutReceiver) -> u32;
         fn browser_port_spout_receiver_height(receiver: *mut BrowserPortSpoutReceiver) -> u32;
         fn browser_port_spout_receiver_receive_bgra(
@@ -82,7 +83,8 @@ mod windows_selftest {
             }
         }
 
-        let warmup_sent = unsafe { browser_port_spout_send_bgra(sender, frame.as_ptr(), width, height) };
+        let warmup_sent =
+            unsafe { browser_port_spout_send_bgra(sender, frame.as_ptr(), width, height) };
         println!("send_ok[warmup]={warmup_sent}");
         if !warmup_sent {
             return Err(format!("send_bgra failed: {}", last_error()));
@@ -90,7 +92,12 @@ mod windows_selftest {
         thread::sleep(Duration::from_millis(20));
         let mut sender_readback = vec![0_u8; width as usize * height as usize * 4];
         let sender_read_ok = unsafe {
-            browser_port_spout_debug_read_sender_bgra(sender, sender_readback.as_mut_ptr(), width, height)
+            browser_port_spout_debug_read_sender_bgra(
+                sender,
+                sender_readback.as_mut_ptr(),
+                width,
+                height,
+            )
         };
         println!("sender_read_ok={sender_read_ok}");
         if !sender_read_ok {
@@ -105,7 +112,8 @@ mod windows_selftest {
         println!("sender_count={sender_count}");
         for i in 0..sender_count {
             let mut buf = vec![0_i8; 256];
-            let ok = unsafe { browser_port_spout_sender_name(i, buf.as_mut_ptr(), buf.len() as i32) };
+            let ok =
+                unsafe { browser_port_spout_sender_name(i, buf.as_mut_ptr(), buf.len() as i32) };
             println!("sender_name_ok[{i}]={ok}");
             if ok {
                 let value = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
@@ -154,7 +162,8 @@ mod windows_selftest {
 
         let mut recv = vec![0_u8; recv_width as usize * recv_height as usize * 4];
         for frame_index in 0..4 {
-            let sent = unsafe { browser_port_spout_send_bgra(sender, frame.as_ptr(), width, height) };
+            let sent =
+                unsafe { browser_port_spout_send_bgra(sender, frame.as_ptr(), width, height) };
             println!("send_ok[{frame_index}]={sent}");
             if !sent {
                 return Err(format!("send_bgra failed: {}", last_error()));

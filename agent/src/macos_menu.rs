@@ -32,15 +32,16 @@ impl TrayState {
         let bind_addr = self.bind_addr.clone();
         let snapshot = self.handle.block_on(async move {
             let lock = state.read().await;
-            (lock.player_routes.len(), lock.syphon_client_count, bind_addr)
+            (
+                lock.player_routes.len(),
+                lock.syphon_client_count,
+                bind_addr,
+            )
         });
 
         let status_title = ns_string("BrowserPort");
         let player_title = ns_string(&format!("Players: {}", snapshot.0));
-        let syphon_title = ns_string(&format!(
-            "Syphon: {}",
-            format_connection_count(snapshot.1)
-        ));
+        let syphon_title = ns_string(&format!("Syphon: {}", format_connection_count(snapshot.1)));
         let ws_title = ns_string(&format!("WS: {}", snapshot.2));
 
         let _: () = msg_send![self.status_item, setTitle: status_title];
@@ -71,7 +72,10 @@ unsafe fn menu_controller_class() -> &'static Class {
         let mut decl = ClassDecl::new("BrowserPortMenuController", superclass)
             .expect("failed to declare BrowserPortMenuController");
         decl.add_ivar::<*mut c_void>("state_ptr");
-        decl.add_method(sel!(refreshMenu:), refresh_menu as extern "C" fn(&Object, Sel, id));
+        decl.add_method(
+            sel!(refreshMenu:),
+            refresh_menu as extern "C" fn(&Object, Sel, id),
+        );
         decl.add_method(sel!(quit:), quit_menu as extern "C" fn(&Object, Sel, id));
         CLASS = decl.register();
     });
@@ -86,6 +90,11 @@ extern "C" fn refresh_menu(this: &Object, _cmd: Sel, _sender: id) {
             return;
         }
         let tray_state = &*(state_ptr as *mut TrayState);
+        if tray_state.stop.load(Ordering::Relaxed) {
+            let app: id = NSApp();
+            let _: () = msg_send![app, terminate: nil];
+            return;
+        }
         tray_state.refresh_titles();
     }
 }

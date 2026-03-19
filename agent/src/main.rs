@@ -654,7 +654,10 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
     let state = Arc::new(RwLock::new(SharedState::default()));
     let bind_addr =
         env::var("BROWSER_PORT_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
-    eprintln!("BrowserPort starting macOS menu bar app on ws://{}", bind_addr);
+    eprintln!(
+        "BrowserPort starting macOS menu bar app on ws://{}",
+        bind_addr
+    );
     let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     let handle = runtime.handle().clone();
     let rt_stop = Arc::clone(&stop);
