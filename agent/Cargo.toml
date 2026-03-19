@@ -3,6 +3,9 @@ name = "browser-port"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+cargo-clippy = []
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"

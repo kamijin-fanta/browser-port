@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::SharedState;
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSVariableStatusItemLength,

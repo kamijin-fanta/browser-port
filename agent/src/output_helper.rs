@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "macos", allow(deprecated))]
+
 use anyhow::{anyhow, bail, Context};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
