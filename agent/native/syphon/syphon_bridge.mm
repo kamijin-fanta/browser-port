@@ -29,7 +29,7 @@ void clear_error() {
 }
 
 bool syphon_native_verbose() {
-    const char *value = std::getenv("BROWSER_PORT_PERF_VERBOSE");
+    const char *value = std::getenv("BROWSER_PORT_SYPHON_NATIVE_VERBOSE");
     if (!value || !value[0]) {
         return false;
     }

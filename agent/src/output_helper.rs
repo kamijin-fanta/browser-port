@@ -1101,6 +1101,20 @@ unsafe fn ns_dictionary_set(dict: id, key: *const std::ffi::c_void, value: id) {
     let _: () = msg_send![dict, setObject: value forKey: key];
 }
 
+#[cfg(target_os = "macos")]
+fn vt_verbose_enabled() -> bool {
+    matches!(
+        std::env::var("BROWSER_PORT_VT_VERBOSE").ok().as_deref(),
+        Some("1")
+            | Some("true")
+            | Some("TRUE")
+            | Some("yes")
+            | Some("YES")
+            | Some("on")
+            | Some("ON")
+    )
+}
+
 trait VideoDecoder {
     fn backend_kind(&self) -> DecodeBackendKind;
     fn decode_into(&mut self, packet: &[u8], frame: &mut DecodedFrame) -> Option<DecodeTimings>;
@@ -1206,32 +1220,47 @@ unsafe extern "C" fn video_toolbox_output_callback(
     _presentation_time_stamp: CMTime,
     _presentation_duration: CMTime,
 ) {
-    eprintln!(
-        "output-helper: videotoolbox callback start status={status} source_frame_ref_con_null={} decompression_output_ref_con_null={} image_buffer_null={}",
-        source_frame_ref_con.is_null(),
-        decompression_output_ref_con.is_null(),
-        image_buffer.is_null()
-    );
+    let verbose = vt_verbose_enabled();
+    if verbose {
+        eprintln!(
+            "output-helper: videotoolbox callback start status={status} source_frame_ref_con_null={} decompression_output_ref_con_null={} image_buffer_null={}",
+            source_frame_ref_con.is_null(),
+            decompression_output_ref_con.is_null(),
+            image_buffer.is_null()
+        );
+    }
     let state_ptr = if !source_frame_ref_con.is_null() {
-        eprintln!("output-helper: videotoolbox callback using state=source_frame_ref_con");
+        if verbose {
+            eprintln!("output-helper: videotoolbox callback using state=source_frame_ref_con");
+        }
         source_frame_ref_con
     } else if !decompression_output_ref_con.is_null() {
-        eprintln!("output-helper: videotoolbox callback using state=decompression_output_ref_con");
+        if verbose {
+            eprintln!(
+                "output-helper: videotoolbox callback using state=decompression_output_ref_con"
+            );
+        }
         decompression_output_ref_con
     } else {
-        eprintln!("output-helper: videotoolbox callback dropped because both state refs were null");
+        if verbose {
+            eprintln!(
+                "output-helper: videotoolbox callback dropped because both state refs were null"
+            );
+        }
         return;
     };
     let state = &mut *(state_ptr as *mut VideoToolboxOutputState);
     state.status = status;
     state.image_buffer_was_null = image_buffer.is_null();
     state.pixel_buffer = CvPixelBufferHandle::retain(image_buffer);
-    eprintln!(
-        "output-helper: videotoolbox callback wrote status={} image_buffer_null={} pixel_buffer_present={}",
-        state.status,
-        state.image_buffer_was_null,
-        state.pixel_buffer.is_some()
-    );
+    if verbose {
+        eprintln!(
+            "output-helper: videotoolbox callback wrote status={} image_buffer_null={} pixel_buffer_present={}",
+            state.status,
+            state.image_buffer_was_null,
+            state.pixel_buffer.is_some()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1290,9 +1319,12 @@ impl VideoToolboxDecoder {
         sample_payload: &[u8],
     ) -> anyhow::Result<*mut std::ffi::c_void> {
         let packet_len = sample_payload.len();
-        self.log_debug(&format!(
-            "about to create CMBlockBuffer with packet_len={packet_len}"
-        ));
+        let verbose = vt_verbose_enabled();
+        if verbose {
+            self.log_debug(&format!(
+                "about to create CMBlockBuffer with packet_len={packet_len}"
+            ));
+        }
         let mut block: *mut std::ffi::c_void = std::ptr::null_mut();
         let create_status = CMBlockBufferCreateWithMemoryBlock(
             kCFAllocatorDefault,
@@ -1305,10 +1337,12 @@ impl VideoToolboxDecoder {
             0,
             &mut block,
         );
-        self.log_debug(&format!(
-            "CMBlockBufferCreateWithMemoryBlock status={create_status} block_ok={}",
-            !block.is_null()
-        ));
+        if verbose {
+            self.log_debug(&format!(
+                "CMBlockBufferCreateWithMemoryBlock status={create_status} block_ok={}",
+                !block.is_null()
+            ));
+        }
         if create_status != 0 || block.is_null() {
             bail!("CMBlockBufferCreateWithMemoryBlock failed status={create_status}");
         }
@@ -1319,9 +1353,11 @@ impl VideoToolboxDecoder {
             0,
             packet_len,
         );
-        self.log_debug(&format!(
-            "CMBlockBufferReplaceDataBytes status={replace_status} packet_len={packet_len}"
-        ));
+        if verbose {
+            self.log_debug(&format!(
+                "CMBlockBufferReplaceDataBytes status={replace_status} packet_len={packet_len}"
+            ));
+        }
         if replace_status != 0 {
             CFRelease(block as CFTypeRef);
             bail!("CMBlockBufferReplaceDataBytes failed status={replace_status}");
@@ -1535,15 +1571,15 @@ impl VideoToolboxDecoder {
         let keyframe_by_nal = nal_types
             .iter()
             .any(|nal| *nal == 5 || *nal == 7 || *nal == 8);
-        self.log_debug(&format!(
-            "decode chunk={} size={} nal_types={:?} keyframe_flag={} keyframe_by_nal={} sample_format=avcc4",
-            self.chunk_index,
-            packet_len,
-            nal_types,
-            keyframe,
-            keyframe_by_nal
-        ));
-        if self.verbose && self.chunk_index <= 3 {
+        if self.verbose {
+            self.log_debug(&format!(
+                "decode chunk={} size={} nal_types={:?} keyframe_flag={} keyframe_by_nal={} sample_format=avcc4",
+                self.chunk_index,
+                packet_len,
+                nal_types,
+                keyframe,
+                keyframe_by_nal
+            ));
             self.log_debug(&format!(
                 "decode chunk={} sample_head={}",
                 self.chunk_index,
@@ -1573,7 +1609,10 @@ impl VideoToolboxDecoder {
                     epoch: 0,
                 },
             };
-            self.log_debug("about to create CMSampleBuffer");
+            let verbose = vt_verbose_enabled();
+            if verbose {
+                self.log_debug("about to create CMSampleBuffer");
+            }
             let status = CMSampleBufferCreateReady(
                 std::ptr::null(),
                 block,
@@ -1586,10 +1625,12 @@ impl VideoToolboxDecoder {
                 &packet_len as *const usize,
                 &mut sample_buffer,
             );
-            self.log_debug(&format!(
-                "CMSampleBufferCreateReady status={status} sample_buffer_ok={}",
-                !sample_buffer.is_null()
-            ));
+            if verbose {
+                self.log_debug(&format!(
+                    "CMSampleBufferCreateReady status={status} sample_buffer_ok={}",
+                    !sample_buffer.is_null()
+                ));
+            }
             if status != 0 || sample_buffer.is_null() {
                 bail!("CMSampleBufferCreateReady failed status={status}");
             }
@@ -1602,7 +1643,10 @@ impl VideoToolboxDecoder {
             image_buffer_was_null: false,
         };
         let mut info_flags = 0_u32;
-        self.log_debug("about to call VTDecompressionSessionDecodeFrame");
+        let verbose = vt_verbose_enabled();
+        if verbose {
+            self.log_debug("about to call VTDecompressionSessionDecodeFrame");
+        }
         let status = unsafe {
             VTDecompressionSessionDecodeFrame(
                 session,
@@ -1612,9 +1656,11 @@ impl VideoToolboxDecoder {
                 &mut info_flags,
             )
         };
-        self.log_debug(&format!(
-            "VTDecompressionSessionDecodeFrame status={status} info_flags=0x{info_flags:08x}"
-        ));
+        if verbose {
+            self.log_debug(&format!(
+                "VTDecompressionSessionDecodeFrame status={status} info_flags=0x{info_flags:08x}"
+            ));
+        }
         if status != 0 {
             unsafe {
                 CFRelease(sample_buffer as CFTypeRef);
@@ -1625,9 +1671,11 @@ impl VideoToolboxDecoder {
             ));
         }
         let status = unsafe { VTDecompressionSessionWaitForAsynchronousFrames(session) };
-        self.log_debug(&format!(
-            "VTDecompressionSessionWaitForAsynchronousFrames status={status}"
-        ));
+        if verbose {
+            self.log_debug(&format!(
+                "VTDecompressionSessionWaitForAsynchronousFrames status={status}"
+            ));
+        }
         if status != 0 {
             unsafe {
                 CFRelease(sample_buffer as CFTypeRef);
@@ -1637,12 +1685,14 @@ impl VideoToolboxDecoder {
                 "VTDecompressionSessionWaitForAsynchronousFrames failed status={status}"
             ));
         }
-        self.log_debug(&format!(
-            "decode callback status={} image_buffer_null={} pixel_buffer_present={}",
-            output_state.status,
-            output_state.image_buffer_was_null,
-            output_state.pixel_buffer.is_some()
-        ));
+        if verbose {
+            self.log_debug(&format!(
+                "decode callback status={} image_buffer_null={} pixel_buffer_present={}",
+                output_state.status,
+                output_state.image_buffer_was_null,
+                output_state.pixel_buffer.is_some()
+            ));
+        }
         if output_state.status != 0 {
             unsafe {
                 CFRelease(sample_buffer as CFTypeRef);
@@ -1680,14 +1730,16 @@ impl VideoDecoder for VideoToolboxDecoder {
         let payload_has_idr = nal_types.iter().any(|nal| *nal == 5);
         let payload_has_parameter_sets = nal_types.iter().any(|nal| *nal == 7 || *nal == 8);
         let keyframe_hint = payload_has_idr || payload_has_parameter_sets;
-        self.log_debug(&format!(
-            "decode input size={} nal_types={:?} keyframe_hint={} idr={} parameter_sets={}",
-            packet.len(),
-            nal_types,
-            keyframe_hint,
-            payload_has_idr,
-            payload_has_parameter_sets
-        ));
+        if self.verbose {
+            self.log_debug(&format!(
+                "decode input size={} nal_types={:?} keyframe_hint={} idr={} parameter_sets={}",
+                packet.len(),
+                nal_types,
+                keyframe_hint,
+                payload_has_idr,
+                payload_has_parameter_sets
+            ));
+        }
         if !self.ensure_session(packet).ok()? {
             return None;
         }
@@ -1711,12 +1763,14 @@ impl VideoDecoder for VideoToolboxDecoder {
         if !iosurface_present {
             self.log_error_rate_limited("pixel buffer is not IOSurface-backed");
         }
-        self.log_debug(&format!(
-            "decoded pixel buffer width={} height={} pixel_format=0x{pixel_format:08x} plane_count={} iosurface_present={iosurface_present}",
-            width,
-            height,
-            plane_count
-        ));
+        if self.verbose {
+            self.log_debug(&format!(
+                "decoded pixel buffer width={} height={} pixel_format=0x{pixel_format:08x} plane_count={} iosurface_present={iosurface_present}",
+                width,
+                height,
+                plane_count
+            ));
+        }
         frame.width = width;
         frame.height = height;
         frame.crop_applied = false;
