@@ -1,8 +1,14 @@
 #[cfg(target_os = "macos")]
 mod macos_selftest {
     use std::ffi::{c_char, CStr, CString};
+    use std::env;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    struct SelftestConfig {
+        sender_name: String,
+        duration: Duration,
+    }
 
     #[repr(C)]
     struct BrowserPortSyphonSender {
@@ -46,7 +52,13 @@ mod macos_selftest {
     }
 
     fn run() -> Result<(), String> {
-        let name = CString::new("codex-syphon-selftest").map_err(|err| err.to_string())?;
+        let config = SelftestConfig::from_args();
+        println!(
+            "syphon_selftest sender={} duration_ms={}",
+            config.sender_name,
+            config.duration.as_millis()
+        );
+        let name = CString::new(config.sender_name.clone()).map_err(|err| err.to_string())?;
         let sender = unsafe { browser_port_syphon_create_sender(name.as_ptr()) };
         if sender.is_null() {
             return Err(format!("create_sender failed: {}", last_error()));
@@ -73,8 +85,9 @@ mod macos_selftest {
             }
         }
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + config.duration;
         let mut receive_attempt = 0_u32;
+        let mut last_ok = Instant::now();
         while Instant::now() < deadline {
             let sent =
                 unsafe { browser_port_syphon_send_bgra(sender, frame.as_ptr(), width, height) };
@@ -120,17 +133,34 @@ mod macos_selftest {
                     sample[3],
                 );
                 if non_black_ratio > 0.01 {
-                    return Ok(());
+                    last_ok = Instant::now();
                 }
             }
 
             thread::sleep(Duration::from_millis(20));
         }
 
-        Err(format!(
-            "timed out without non-black frame (last_error={})",
-            last_error()
-        ))
+        if last_ok.elapsed() <= config.duration {
+            return Ok(());
+        }
+        Err(format!("timed out without non-black frame (last_error={})", last_error()))
+    }
+
+    impl SelftestConfig {
+        fn from_args() -> Self {
+            let mut args = env::args().skip(1);
+            let sender_name = args
+                .next()
+                .unwrap_or_else(|| "codex-syphon-selftest".to_string());
+            let duration_secs = args
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(8);
+            Self {
+                sender_name,
+                duration: Duration::from_secs(duration_secs),
+            }
+        }
     }
 
     fn analyze_frame(bgra: &[u8]) -> Option<(f64, f64, [u8; 4])> {

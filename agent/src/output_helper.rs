@@ -1311,7 +1311,9 @@ impl VideoToolboxDecoder {
     }
 
     fn log_debug(&self, message: &str) {
-        eprintln!("output-helper: videotoolbox {message}");
+        if vt_verbose_enabled() {
+            eprintln!("output-helper: videotoolbox {message}");
+        }
     }
 
     unsafe fn create_sample_block_buffer(
@@ -1571,7 +1573,7 @@ impl VideoToolboxDecoder {
         let keyframe_by_nal = nal_types
             .iter()
             .any(|nal| *nal == 5 || *nal == 7 || *nal == 8);
-        if self.verbose {
+        if self.verbose && vt_verbose_enabled() {
             self.log_debug(&format!(
                 "decode chunk={} size={} nal_types={:?} keyframe_flag={} keyframe_by_nal={} sample_format=avcc4",
                 self.chunk_index,
@@ -1730,7 +1732,7 @@ impl VideoDecoder for VideoToolboxDecoder {
         let payload_has_idr = nal_types.iter().any(|nal| *nal == 5);
         let payload_has_parameter_sets = nal_types.iter().any(|nal| *nal == 7 || *nal == 8);
         let keyframe_hint = payload_has_idr || payload_has_parameter_sets;
-        if self.verbose {
+        if self.verbose && vt_verbose_enabled() {
             self.log_debug(&format!(
                 "decode input size={} nal_types={:?} keyframe_hint={} idr={} parameter_sets={}",
                 packet.len(),
@@ -1763,7 +1765,7 @@ impl VideoDecoder for VideoToolboxDecoder {
         if !iosurface_present {
             self.log_error_rate_limited("pixel buffer is not IOSurface-backed");
         }
-        if self.verbose {
+        if self.verbose && vt_verbose_enabled() {
             self.log_debug(&format!(
                 "decoded pixel buffer width={} height={} pixel_format=0x{pixel_format:08x} plane_count={} iosurface_present={iosurface_present}",
                 width,
@@ -3683,7 +3685,7 @@ impl DecoderState {
                 "output-helper: keyframe flag missing; treating packet as keyframe via H264 NAL detection"
             );
         }
-        if self.perf_config.verbose || self.video_frames_out == 0 {
+        if self.perf_config.verbose {
             eprintln!(
                 "output-helper: h264 chunk size={} nal_types={:?} keyframe_flag={} effective_keyframe={} idr={} sps_pps={}",
                 packet.len(),
@@ -3697,17 +3699,21 @@ impl DecoderState {
         if self.catchup_active {
             if latency_ms <= CATCHUP_EXIT_LAG_MS {
                 self.catchup_active = false;
-                eprintln!(
-                    "output-helper: catchup disabled latency_ms={:.1}",
-                    latency_ms
-                );
+                if self.perf_config.verbose {
+                    eprintln!(
+                        "output-helper: catchup disabled latency_ms={:.1}",
+                        latency_ms
+                    );
+                }
             }
         } else if !effective_keyframe && latency_ms > CATCHUP_ENTER_LAG_MS {
             self.catchup_active = true;
-            eprintln!(
-                "output-helper: catchup enabled latency_ms={:.1}; decode continues (no packet drop)",
-                latency_ms
-            );
+            if self.perf_config.verbose {
+                eprintln!(
+                    "output-helper: catchup enabled latency_ms={:.1}; decode continues (no packet drop)",
+                    latency_ms
+                );
+            }
         }
         let backlog = self.pending_backlog();
         if self.needs_keyframe && !effective_keyframe {

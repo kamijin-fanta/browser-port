@@ -787,7 +787,9 @@ void browser_port_syphon_destroy_sender(BrowserPortSyphonSender *state) {
         if (!state) {
             return;
         }
-        fprintf(stderr, "output-helper: syphon sender native destroy state=%p\n", state);
+        if (syphon_native_verbose()) {
+            fprintf(stderr, "output-helper: syphon sender native destroy state=%p\n", state);
+        }
         if (state->server) {
             SEL stop_selector = sel_registerName("stop");
             if ([state->server respondsToSelector:stop_selector]) {
