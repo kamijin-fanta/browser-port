@@ -100,6 +100,7 @@ const FASTPATH_DECODE_STALL_THRESHOLD: u32 = 24;
 const COMPRESSED_VIDEO_QUEUE_CAPACITY: usize = 4;
 const PIPELINE_TICK_INTERVAL: Duration = Duration::from_millis(4);
 const PLAYER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const PARENT_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "macos")]
 const SYPHON_STATIC_PLAYER_IDS: [u32; 4] = [1, 2, 3, 4];
 
@@ -109,6 +110,7 @@ static MF_RUNTIME_REFS: AtomicUsize = AtomicUsize::new(0);
 pub struct OutputHelperArgs {
     mode: OutputMode,
     ws_url: String,
+    parent_pid: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -198,8 +200,13 @@ pub fn parse_from_env() -> anyhow::Result<Option<OutputHelperArgs>> {
         return Ok(None);
     }
     args.remove(0);
+    parse_output_helper_cli_args(&args).map(Some)
+}
+
+fn parse_output_helper_cli_args(args: &[String]) -> anyhow::Result<OutputHelperArgs> {
     let mut mode: Option<OutputMode> = None;
     let mut ws_url = "ws://127.0.0.1:1844".to_string();
+    let mut parent_pid: Option<u32> = None;
     let mut idx = 0;
     while idx < args.len() {
         let key = args[idx].as_str();
@@ -216,13 +223,26 @@ pub fn parse_from_env() -> anyhow::Result<Option<OutputHelperArgs>> {
                 mode = Some(parsed);
             }
             "--ws" => ws_url = value.to_string(),
+            "--parent-pid" => {
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|_| anyhow!("invalid --parent-pid value: {value}"))?;
+                if parsed <= 1 {
+                    bail!("--parent-pid must be greater than 1");
+                }
+                parent_pid = Some(parsed);
+            }
             _ => bail!("unsupported argument: {key}"),
         }
     }
     let Some(mode) = mode else {
         bail!("--mode is required");
     };
-    Ok(Some(OutputHelperArgs { mode, ws_url }))
+    Ok(OutputHelperArgs {
+        mode,
+        ws_url,
+        parent_pid,
+    })
 }
 
 struct PendingVideoChunk {
@@ -244,7 +264,17 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
     let mut pending_video: HashMap<u32, VecDeque<PendingVideoChunk>> = HashMap::new();
     let mut latest_decoded: HashMap<u32, DecodedFrame> = HashMap::new();
     let mut last_stats_at = Instant::now();
+    let mut parent_watch_tick = tokio::time::interval(PARENT_WATCH_POLL_INTERVAL);
+    parent_watch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    parent_watch_tick.tick().await;
     loop {
+        if should_exit_for_parent_loss(args.parent_pid) {
+            eprintln!(
+                "output-helper: parent process {} is gone; exiting",
+                args.parent_pid.unwrap_or(0)
+            );
+            return Ok(());
+        }
         let ws_stream = match tokio_tungstenite::connect_async(&args.ws_url).await {
             Ok(value) => value,
             Err(_) => {
@@ -273,6 +303,13 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
         pipeline_tick.tick().await;
 
         'connection: loop {
+            if should_exit_for_parent_loss(args.parent_pid) {
+                eprintln!(
+                    "output-helper: parent process {} is gone; exiting",
+                    args.parent_pid.unwrap_or(0)
+                );
+                return Ok(());
+            }
             tokio::select! {
                 next = ws.next() => {
                     let Some(next) = next else {
@@ -320,6 +357,15 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
                     }
                 }
                 _ = pipeline_tick.tick() => {}
+                _ = parent_watch_tick.tick(), if args.parent_pid.is_some() => {
+                    if should_exit_for_parent_loss(args.parent_pid) {
+                        eprintln!(
+                            "output-helper: parent process {} is gone; exiting",
+                            args.parent_pid.unwrap_or(0)
+                        );
+                        return Ok(());
+                    }
+                }
             }
 
             run_decode_stage(
@@ -351,6 +397,58 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+    }
+}
+
+#[cfg(unix)]
+fn should_exit_for_parent_loss(parent_pid: Option<u32>) -> bool {
+    let Some(parent_pid) = parent_pid else {
+        return false;
+    };
+    if parent_pid <= 1 {
+        return false;
+    }
+    if unsafe { libc::getppid() } == 1 {
+        return true;
+    }
+    let rc = unsafe { libc::kill(parent_pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return false;
+    }
+    match last_errno() {
+        Some(errno) if errno == libc::ESRCH => true,
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn should_exit_for_parent_loss(_parent_pid: Option<u32>) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn last_errno() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let ptr = libc::__error();
+        if ptr.is_null() {
+            None
+        } else {
+            Some(*ptr)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let ptr = libc::__errno_location();
+        if ptr.is_null() {
+            None
+        } else {
+            Some(*ptr)
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
     }
 }
 
@@ -4787,8 +4885,8 @@ mod tests {
     use super::{
         annexb_contains_idr, annexb_contains_sps_or_pps, annexb_to_avcc, avcc_to_annexb,
         h264_nal_types, is_annexb, parse_avcc_record, parse_decode_backend_preference,
-        preferred_backend_order, select_backend_with, vt_prepare_sample_payload, DecodeBackendKind,
-        DecodeBackendPreference, H264Context,
+        parse_output_helper_cli_args, preferred_backend_order, select_backend_with,
+        vt_prepare_sample_payload, DecodeBackendKind, DecodeBackendPreference, H264Context,
     };
 
     fn sample_avcc() -> Vec<u8> {
@@ -4964,6 +5062,49 @@ mod tests {
             backend == DecodeBackendKind::OpenH264
         });
         assert_eq!(selected, Some(DecodeBackendKind::OpenH264));
+    }
+
+    #[test]
+    fn parse_output_helper_args_with_parent_pid() {
+        let args = vec![
+            "--mode".to_string(),
+            "syphon".to_string(),
+            "--ws".to_string(),
+            "ws://127.0.0.1:1844".to_string(),
+            "--parent-pid".to_string(),
+            "4242".to_string(),
+        ];
+        let parsed = parse_output_helper_cli_args(&args).expect("valid helper args");
+        assert_eq!(parsed.parent_pid, Some(4242));
+    }
+
+    #[test]
+    fn parse_output_helper_args_without_parent_pid() {
+        let args = vec!["--mode".to_string(), "syphon".to_string()];
+        let parsed = parse_output_helper_cli_args(&args).expect("valid helper args");
+        assert_eq!(parsed.parent_pid, None);
+    }
+
+    #[test]
+    fn parse_output_helper_args_rejects_invalid_parent_pid() {
+        let args = vec![
+            "--mode".to_string(),
+            "syphon".to_string(),
+            "--parent-pid".to_string(),
+            "abc".to_string(),
+        ];
+        assert!(parse_output_helper_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_output_helper_args_rejects_zero_parent_pid() {
+        let args = vec![
+            "--mode".to_string(),
+            "syphon".to_string(),
+            "--parent-pid".to_string(),
+            "0".to_string(),
+        ];
+        assert!(parse_output_helper_cli_args(&args).is_err());
     }
 }
 

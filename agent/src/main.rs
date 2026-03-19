@@ -529,7 +529,9 @@ impl OutputProcessManager {
             .arg("--mode")
             .arg(output_name)
             .arg("--ws")
-            .arg(ws_url);
+            .arg(ws_url)
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string());
         if output_name == "spout" && self.spout_fastpath_forced_off {
             command.env("BROWSER_PORT_SPOUT_TEXTURE_FASTPATH", "0");
         }
@@ -700,6 +702,18 @@ async fn run_browser_port(
         let stop_ref = Arc::clone(&stop);
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
+                stop_ref.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let stop_ref = Arc::clone(&stop);
+        tokio::spawn(async move {
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                let _ = sigterm.recv().await;
                 stop_ref.store(true, Ordering::Relaxed);
             }
         });

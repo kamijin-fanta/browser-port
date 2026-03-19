@@ -44,6 +44,7 @@ dependencies = [
  "cc",
  "cocoa",
  "futures-util",
+ "libc",
  "ndi",
  "objc",
  "openh264",

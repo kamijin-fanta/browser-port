@@ -40,7 +40,7 @@ On macOS, `spout` is not supported. Use `output=syphon`.
 BrowserPort launches the same executable as:
 
 ```powershell
-browser-port output-helper --mode <spout|syphon|ndi> --ws ws://127.0.0.1:1844
+browser-port output-helper --mode <spout|syphon|ndi> --ws ws://127.0.0.1:1844 [--parent-pid <pid>]
 ```
 
 Override command per output:

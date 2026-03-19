@@ -19,6 +19,9 @@ cc = "1.2"
 cocoa = "0.26"
 objc = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 ndi = "0.1.2"
 
