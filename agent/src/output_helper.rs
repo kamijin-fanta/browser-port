@@ -77,6 +77,12 @@ const SPOUT_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(800);
 const PERF_EWMA_ALPHA: f64 = 0.2;
 #[cfg(target_os = "windows")]
 const MF_STALL_SWITCH_THRESHOLD: u32 = 180;
+#[cfg(target_os = "macos")]
+const VT_STALL_SWITCH_THRESHOLD: u32 = 60;
+#[cfg(target_os = "macos")]
+const VT_STALL_HEX_DUMP_LIMIT: usize = 3;
+#[cfg(target_os = "macos")]
+const VT_STALL_HEX_DUMP_BYTES: usize = 64;
 const KEYFRAME_RESYNC_EMPTY_THRESHOLD: u32 = 45;
 const BACKLOG_SEVERE_THRESHOLD: u64 = 120;
 const CATCHUP_ENTER_LAG_MS: f64 = 140.0;
@@ -94,6 +100,8 @@ const FASTPATH_DECODE_STALL_THRESHOLD: u32 = 24;
 const COMPRESSED_VIDEO_QUEUE_CAPACITY: usize = 4;
 const PIPELINE_TICK_INTERVAL: Duration = Duration::from_millis(4);
 const PLAYER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const SYPHON_STATIC_PLAYER_IDS: [u32; 4] = [1, 2, 3, 4];
 
 #[cfg(target_os = "windows")]
 static MF_RUNTIME_REFS: AtomicUsize = AtomicUsize::new(0);
@@ -147,6 +155,15 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn vt_fallback_disabled() -> bool {
+    std::env::var("BROWSER_PORT_DISABLE_VT_FALLBACK")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -510,16 +527,73 @@ fn handle_text_message(
         decoder.reset_decoder();
         if let Some(description_b64) = description_b64 {
             if !description_b64.is_empty() {
-                if !decoder.update_avcc_from_base64(description_b64) {
-                    eprintln!(
-                        "output-helper: failed to parse H.264 decoder config for player {}",
-                        player_id
-                    );
-                    decoder.clear_avcc();
+                eprintln!(
+                    "output-helper: config player={} description_b64_len={}",
+                    player_id,
+                    description_b64.len()
+                );
+                match BASE64_STANDARD.decode(description_b64) {
+                    Ok(bytes) => {
+                        eprintln!(
+                            "output-helper: config player={} avcc_bytes={}",
+                            player_id,
+                            bytes.len()
+                        );
+                        match parse_avcc_record(&bytes) {
+                            Some((nal_length_size, parameter_sets, sps, pps)) => {
+                                let sps_sizes = sps
+                                    .iter()
+                                    .map(|set| set.len().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                let pps_sizes = pps
+                                    .iter()
+                                    .map(|set| set.len().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                eprintln!(
+                                    "output-helper: config player={} avcc nal_length_size={} sps_count={} sps_sizes=[{}] pps_count={} pps_sizes=[{}] parameter_sets_total={}",
+                                    player_id,
+                                    nal_length_size,
+                                    sps.len(),
+                                    sps_sizes,
+                                    pps.len(),
+                                    pps_sizes,
+                                    parameter_sets.len()
+                                );
+                            }
+                            None => {
+                                eprintln!(
+                                    "output-helper: config player={} failed to parse avcc record",
+                                    player_id
+                                );
+                            }
+                        }
+                        if !decoder.update_avcc_from_base64(description_b64) {
+                            eprintln!(
+                                "output-helper: failed to parse H.264 decoder config for player {}",
+                                player_id
+                            );
+                            decoder.clear_avcc();
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "output-helper: failed to base64 decode H.264 config player={} err={}",
+                            player_id,
+                            err
+                        );
+                        decoder.clear_avcc();
+                    }
                 }
             } else {
                 decoder.clear_avcc();
             }
+        } else {
+            eprintln!(
+                "output-helper: config player={} no description avcc present",
+                player_id
+            );
         }
         decoder.last_config_fingerprint = Some(config_fingerprint);
     }
@@ -855,7 +929,11 @@ extern "C" {
 #[cfg(target_os = "macos")]
 #[link(name = "VideoToolbox", kind = "framework")]
 extern "C" {
+    static kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder:
+        *const std::ffi::c_void;
     static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:
+        *const std::ffi::c_void;
+    static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder:
         *const std::ffi::c_void;
     static kCVPixelBufferMetalCompatibilityKey: *const std::ffi::c_void;
     static kCVPixelBufferIOSurfacePropertiesKey: *const std::ffi::c_void;
@@ -907,6 +985,13 @@ extern "C" {
     ) -> OSStatus;
     fn VTDecompressionSessionWaitForAsynchronousFrames(session: *mut std::ffi::c_void) -> OSStatus;
     fn VTDecompressionSessionInvalidate(session: *mut std::ffi::c_void);
+    fn VTSessionCopyProperty(
+        session: *mut std::ffi::c_void,
+        property_key: *const std::ffi::c_void,
+        allocator: CFAllocatorRef,
+        property_value_out: *mut *mut std::ffi::c_void,
+    ) -> OSStatus;
+    fn CFBooleanGetValue(boolean: *const std::ffi::c_void) -> bool;
 }
 
 #[cfg(target_os = "macos")]
@@ -1088,6 +1173,14 @@ struct VTDecompressionOutputCallbackRecord {
 struct VideoToolboxOutputState {
     pixel_buffer: Option<CvPixelBufferHandle>,
     status: OSStatus,
+    image_buffer_was_null: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Default)]
+struct VideoToolboxH264Config {
+    nal_length_size: usize,
+    parameter_sets: Vec<Vec<u8>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1110,6 +1203,7 @@ unsafe extern "C" fn video_toolbox_output_callback(
     };
     let state = &mut *(state_ptr as *mut VideoToolboxOutputState);
     state.status = status;
+    state.image_buffer_was_null = image_buffer.is_null();
     state.pixel_buffer = CvPixelBufferHandle::retain(image_buffer);
 }
 
@@ -1117,6 +1211,7 @@ unsafe extern "C" fn video_toolbox_output_callback(
 struct VideoToolboxDecoder {
     session: Option<*mut std::ffi::c_void>,
     format_description: Option<*mut std::ffi::c_void>,
+    config: Option<VideoToolboxH264Config>,
     expected_width: usize,
     expected_height: usize,
     frame_width: usize,
@@ -1124,14 +1219,17 @@ struct VideoToolboxDecoder {
     hardware_requested: bool,
     last_error_log: Option<Instant>,
     callback_record: Option<Box<VTDecompressionOutputCallbackRecord>>,
+    chunk_index: u64,
+    verbose: bool,
 }
 
 #[cfg(target_os = "macos")]
 impl VideoToolboxDecoder {
-    fn new() -> anyhow::Result<Self> {
+    fn new(config: Option<VideoToolboxH264Config>, verbose: bool) -> anyhow::Result<Self> {
         Ok(Self {
             session: None,
             format_description: None,
+            config,
             expected_width: 0,
             expected_height: 0,
             frame_width: 0,
@@ -1139,6 +1237,8 @@ impl VideoToolboxDecoder {
             hardware_requested: true,
             last_error_log: None,
             callback_record: None,
+            chunk_index: 0,
+            verbose,
         })
     }
 
@@ -1154,15 +1254,94 @@ impl VideoToolboxDecoder {
         }
     }
 
+    fn log_debug(&self, message: &str) {
+        eprintln!("output-helper: videotoolbox {message}");
+    }
+
+    fn log_hardware_usage(&self, session: *mut std::ffi::c_void) {
+        unsafe {
+            let mut property_value: *mut std::ffi::c_void = std::ptr::null_mut();
+            let status = VTSessionCopyProperty(
+                session,
+                kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                std::ptr::null(),
+                &mut property_value,
+            );
+            if status != 0 {
+                self.log_debug(&format!(
+                    "session hardware usage query failed status={status}"
+                ));
+                return;
+            }
+            if property_value.is_null() {
+                self.log_debug("session hardware usage query returned null");
+                return;
+            }
+            let using_hw = CFBooleanGetValue(property_value as *const std::ffi::c_void);
+            self.log_debug(&format!("session hardware usage using_hw={using_hw}"));
+            CFRelease(property_value as CFTypeRef);
+        }
+    }
+
+    fn config_parameter_sets_summary(&self) -> Option<String> {
+        let config = self.config.as_ref()?;
+        let sizes = config
+            .parameter_sets
+            .iter()
+            .map(|set| set.len().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(format!(
+            "nal_unit_header_length={} parameter_sets={} sizes=[{}]",
+            config.nal_length_size,
+            config.parameter_sets.len(),
+            sizes
+        ))
+    }
+
     fn ensure_session(&mut self, packet: &[u8]) -> anyhow::Result<bool> {
         if self.session.is_some() {
             return Ok(true);
         }
-        let Some((parameter_sets, nal_length_size)) = extract_annexb_parameter_sets(packet) else {
-            return Ok(false);
-        };
+        let mut parameter_sets = Vec::new();
+        let mut nal_length_size = 4_usize;
+
+        if let Some(config) = &self.config {
+            parameter_sets = config.parameter_sets.clone();
+            self.log_debug(&format!(
+                "config available nal_unit_header_length={} parameter_sets={} sizes=[{}]",
+                config.nal_length_size,
+                parameter_sets.len(),
+                parameter_sets
+                    .iter()
+                    .map(|set| set.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+
         if parameter_sets.is_empty() {
-            return Ok(false);
+            let Some((packet_parameter_sets, packet_nal_length_size)) =
+                extract_annexb_parameter_sets(packet)
+            else {
+                self.log_debug("waiting for H.264 config before creating session");
+                return Ok(false);
+            };
+            if packet_parameter_sets.is_empty() {
+                self.log_debug("packet did not include SPS/PPS for session creation");
+                return Ok(false);
+            }
+            self.log_debug(&format!(
+                "using packet parameter sets fallback nal_unit_header_length={packet_nal_length_size} parameter_sets={} sizes=[{}]",
+                packet_parameter_sets.len(),
+                packet_parameter_sets
+                    .iter()
+                    .map(|set| set.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            parameter_sets = packet_parameter_sets;
+            nal_length_size = 4;
         }
 
         let mut parameter_ptrs: Vec<*const u8> = Vec::with_capacity(parameter_sets.len());
@@ -1183,6 +1362,10 @@ impl VideoToolboxDecoder {
                 &mut format_description,
             )
         };
+        self.log_debug(&format!(
+            "CMVideoFormatDescriptionCreateFromH264ParameterSets status={status} nal_unit_header_length={nal_length_size} parameter_sets={}",
+            parameter_sets.len()
+        ));
         if status != 0 || format_description.is_null() {
             self.log_error_rate_limited("failed to create H.264 format description");
             return Ok(false);
@@ -1205,8 +1388,13 @@ impl VideoToolboxDecoder {
             let dict = ns_mutable_dictionary();
             ns_dictionary_set(
                 dict,
+                kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
+                ns_bool(self.hardware_requested),
+            );
+            ns_dictionary_set(
+                dict,
                 kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder,
-                ns_bool(true),
+                ns_bool(self.hardware_requested),
             );
             dict
         };
@@ -1230,6 +1418,10 @@ impl VideoToolboxDecoder {
                 &mut session,
             )
         };
+        self.log_debug(&format!(
+            "VTDecompressionSessionCreate status={status} session_is_null={}",
+            session.is_null()
+        ));
         if status != 0 || session.is_null() {
             self.log_error_rate_limited("failed to create decompression session");
             unsafe {
@@ -1242,26 +1434,53 @@ impl VideoToolboxDecoder {
         self.format_description = Some(format_description);
         self.frame_width = 0;
         self.frame_height = 0;
-        eprintln!(
-            "output-helper: videotoolbox session initialized hardware_requested={}",
-            self.hardware_requested
-        );
+        self.log_debug(&format!(
+            "session initialized hardware_requested={} config={}",
+            self.hardware_requested,
+            self.config_parameter_sets_summary()
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        self.log_hardware_usage(session);
         Ok(true)
     }
 
-    fn decode_sample(&mut self, packet: &[u8]) -> anyhow::Result<Option<CvPixelBufferHandle>> {
+    fn decode_sample(
+        &mut self,
+        packet: &[u8],
+        keyframe: bool,
+    ) -> anyhow::Result<Option<CvPixelBufferHandle>> {
         let Some(session) = self.session else {
             return Ok(None);
         };
-        let packet_len = packet.len();
+        let sample_payload =
+            vt_prepare_sample_payload(packet).context("vt_prepare_sample_payload failed")?;
+        let packet_len = sample_payload.len();
         if packet_len == 0 {
             return Ok(None);
+        }
+        self.chunk_index = self.chunk_index.saturating_add(1);
+        let nal_types = h264_nal_types(&sample_payload, Some(4));
+        let keyframe_by_nal = nal_types.iter().any(|nal| *nal == 5 || *nal == 7 || *nal == 8);
+        self.log_debug(&format!(
+            "decode chunk={} size={} nal_types={:?} keyframe_flag={} keyframe_by_nal={} sample_format=avcc4",
+            self.chunk_index,
+            packet_len,
+            nal_types,
+            keyframe,
+            keyframe_by_nal
+        ));
+        if self.verbose && self.chunk_index <= 3 {
+            self.log_debug(&format!(
+                "decode chunk={} sample_head={}",
+                self.chunk_index,
+                hex_dump_prefix(&sample_payload, VT_STALL_HEX_DUMP_BYTES)
+            ));
         }
         let block = unsafe {
             let mut block: *mut std::ffi::c_void = std::ptr::null_mut();
             let status = CMBlockBufferCreateWithMemoryBlock(
                 std::ptr::null(),
-                packet.as_ptr() as *mut std::ffi::c_void,
+                sample_payload.as_ptr() as *mut std::ffi::c_void,
                 packet_len,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -1273,6 +1492,9 @@ impl VideoToolboxDecoder {
             if status != 0 || block.is_null() {
                 bail!("CMBlockBufferCreateWithMemoryBlock failed status={status}");
             }
+            self.log_debug(&format!(
+                "CMBlockBufferCreateWithMemoryBlock status={status} block_ok=true sample_size={packet_len}"
+            ));
             block
         };
         let sample_buffer = unsafe {
@@ -1312,22 +1534,19 @@ impl VideoToolboxDecoder {
             if status != 0 || sample_buffer.is_null() {
                 bail!("CMSampleBufferCreateReady failed status={status}");
             }
+            self.log_debug(&format!(
+                "CMSampleBufferCreateReady status={status} sample_buffer_ok=true sample_size={packet_len}"
+            ));
             sample_buffer
         };
 
         let mut output_state = VideoToolboxOutputState {
             pixel_buffer: None,
             status: 0,
+            image_buffer_was_null: false,
         };
         let mut info_flags = 0_u32;
-        let mut callback = VTDecompressionOutputCallbackRecord {
-            decompression_output_callback: Some(video_toolbox_output_callback),
-            decompression_output_ref_con: &mut output_state as *mut _ as *mut std::ffi::c_void,
-        };
         let status = unsafe {
-            // Bind the callback state just before decode; VT keeps the record only for the call.
-            let callback_ptr = &mut callback as *mut _ as *const std::ffi::c_void;
-            let _ = callback_ptr;
             VTDecompressionSessionDecodeFrame(
                 session,
                 sample_buffer,
@@ -1336,24 +1555,53 @@ impl VideoToolboxDecoder {
                 &mut info_flags,
             )
         };
+        self.log_debug(&format!(
+            "VTDecompressionSessionDecodeFrame status={status} info_flags=0x{info_flags:08x}"
+        ));
         if status != 0 {
+            unsafe {
+                CFRelease(sample_buffer as CFTypeRef);
+                CFRelease(block as CFTypeRef);
+            }
             return Err(anyhow!(
                 "VTDecompressionSessionDecodeFrame failed status={status}"
             ));
         }
         let status = unsafe { VTDecompressionSessionWaitForAsynchronousFrames(session) };
+        self.log_debug(&format!(
+            "VTDecompressionSessionWaitForAsynchronousFrames status={status}"
+        ));
         if status != 0 {
+            unsafe {
+                CFRelease(sample_buffer as CFTypeRef);
+                CFRelease(block as CFTypeRef);
+            }
             return Err(anyhow!(
                 "VTDecompressionSessionWaitForAsynchronousFrames failed status={status}"
             ));
         }
+        self.log_debug(&format!(
+            "decode callback status={} image_buffer_null={} pixel_buffer_present={}",
+            output_state.status,
+            output_state.image_buffer_was_null,
+            output_state.pixel_buffer.is_some()
+        ));
         if output_state.status != 0 {
+            unsafe {
+                CFRelease(sample_buffer as CFTypeRef);
+                CFRelease(block as CFTypeRef);
+            }
             return Err(anyhow!(
                 "VT output callback failed status={}",
                 output_state.status
             ));
         }
-        Ok(output_state.pixel_buffer)
+        let pixel_buffer = output_state.pixel_buffer;
+        unsafe {
+            CFRelease(sample_buffer as CFTypeRef);
+            CFRelease(block as CFTypeRef);
+        }
+        Ok(pixel_buffer)
     }
 }
 
@@ -1370,18 +1618,25 @@ impl VideoDecoder for VideoToolboxDecoder {
 
     fn decode_into(&mut self, packet: &[u8], frame: &mut DecodedFrame) -> Option<DecodeTimings> {
         let decode_started = Instant::now();
-        let normalized = if is_annexb(packet) {
-            packet.to_vec()
-        } else {
-            return None;
-        };
-        if !self.ensure_session(&normalized).ok()? {
+        let nal_length_size = self.config.as_ref().map(|config| config.nal_length_size);
+        let nal_types = h264_nal_types(packet, nal_length_size);
+        let payload_has_idr = nal_types.iter().any(|nal| *nal == 5);
+        let payload_has_parameter_sets = nal_types.iter().any(|nal| *nal == 7 || *nal == 8);
+        let keyframe_hint = payload_has_idr || payload_has_parameter_sets;
+        self.log_debug(&format!(
+            "decode input size={} nal_types={:?} keyframe_hint={} idr={} parameter_sets={}",
+            packet.len(),
+            nal_types,
+            keyframe_hint,
+            payload_has_idr,
+            payload_has_parameter_sets
+        ));
+        if !self.ensure_session(packet).ok()? {
             return None;
         }
-        let decode_elapsed = decode_started.elapsed();
 
         let convert_started = Instant::now();
-        let pixel_buffer = match self.decode_sample(&normalized) {
+        let pixel_buffer = match self.decode_sample(packet, keyframe_hint) {
             Ok(Some(buffer)) => buffer,
             Ok(None) => return None,
             Err(err) => {
@@ -1389,6 +1644,7 @@ impl VideoDecoder for VideoToolboxDecoder {
                 return None;
             }
         };
+        let decode_elapsed = decode_started.elapsed();
         let width = unsafe { CVPixelBufferGetWidth(pixel_buffer.as_raw()) };
         let height = unsafe { CVPixelBufferGetHeight(pixel_buffer.as_raw()) };
         if unsafe { CVPixelBufferGetIOSurface(pixel_buffer.as_raw()) }.is_null() {
@@ -3297,6 +3553,26 @@ impl DecoderState {
         self.maybe_retry_fastpath();
         let latency_ms = self.estimate_stream_latency_ms(timestamp_us);
         self.perf.stream_latency_ms = latency_ms.max(0.0);
+        let payload_has_idr = self.h264.payload_contains_idr(packet);
+        let payload_has_parameter_sets = self.h264.payload_contains_parameter_sets(packet);
+        let payload_nal_types = h264_nal_types(packet, self.h264.nal_length_size);
+        let effective_keyframe = keyframe || payload_has_idr || payload_has_parameter_sets;
+        if (payload_has_idr || payload_has_parameter_sets) && !keyframe {
+            eprintln!(
+                "output-helper: keyframe flag missing; treating packet as keyframe via H264 NAL detection"
+            );
+        }
+        if self.perf_config.verbose || self.video_frames_out == 0 {
+            eprintln!(
+                "output-helper: h264 chunk size={} nal_types={:?} keyframe_flag={} effective_keyframe={} idr={} sps_pps={}",
+                packet.len(),
+                payload_nal_types,
+                keyframe,
+                effective_keyframe,
+                payload_has_idr,
+                payload_has_parameter_sets
+            );
+        }
         if self.catchup_active {
             if latency_ms <= CATCHUP_EXIT_LAG_MS {
                 self.catchup_active = false;
@@ -3305,7 +3581,7 @@ impl DecoderState {
                     latency_ms
                 );
             }
-        } else if !keyframe && latency_ms > CATCHUP_ENTER_LAG_MS {
+        } else if !effective_keyframe && latency_ms > CATCHUP_ENTER_LAG_MS {
             self.catchup_active = true;
             eprintln!(
                 "output-helper: catchup enabled latency_ms={:.1}; decode continues (no packet drop)",
@@ -3313,15 +3589,22 @@ impl DecoderState {
             );
         }
         let backlog = self.pending_backlog();
-        if self.needs_keyframe && !keyframe {
+        if self.needs_keyframe && !effective_keyframe {
             self.video_chunks_dropped = self.video_chunks_dropped.saturating_add(1);
             self.update_queue_depth();
             return None;
         }
-        if keyframe {
+        if effective_keyframe {
             self.needs_keyframe = false;
         }
-        let normalized_packet = self.h264.normalize_for_decode(packet, keyframe);
+        let normalized_packet = match self.decoder.as_ref().map(|decoder| decoder.backend_kind()) {
+            Some(DecodeBackendKind::OpenH264) => self.h264.normalize_for_decode(packet, effective_keyframe),
+            #[cfg(target_os = "macos")]
+            Some(DecodeBackendKind::VideoToolbox) => None,
+            #[cfg(target_os = "windows")]
+            Some(DecodeBackendKind::MfD3d11) => self.h264.normalize_for_decode(packet, effective_keyframe),
+            None => self.h264.normalize_for_decode(packet, effective_keyframe),
+        };
 
         if !self.ensure_decoder() {
             self.needs_keyframe = true;
@@ -3358,23 +3641,58 @@ impl DecoderState {
             };
             decoder.decode_into(normalized_packet, &mut self.frame)
         } else {
-            // Media Foundation backend can accept different NAL framing depending on stream.
-            // Try the original payload first, then AnnexB-normalized payload as fallback.
-            let direct = decoder.decode_into(packet, &mut self.frame);
-            if direct.is_some() {
-                direct
-            } else if let Some(normalized) = normalized_packet.as_ref() {
-                if normalized.as_slice() != packet {
-                    decoder.decode_into(normalized, &mut self.frame)
+            #[cfg(target_os = "macos")]
+            {
+                if backend == DecodeBackendKind::VideoToolbox {
+                    decoder.decode_into(packet, &mut self.frame)
+                } else {
+                    // Media Foundation backend can accept different NAL framing depending on stream.
+                    // Try the original payload first, then AnnexB-normalized payload as fallback.
+                    let direct = decoder.decode_into(packet, &mut self.frame);
+                    if direct.is_some() {
+                        direct
+                    } else if let Some(normalized) = normalized_packet.as_ref() {
+                        if normalized.as_slice() != packet {
+                            decoder.decode_into(normalized, &mut self.frame)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Media Foundation backend can accept different NAL framing depending on stream.
+                // Try the original payload first, then AnnexB-normalized payload as fallback.
+                let direct = decoder.decode_into(packet, &mut self.frame);
+                if direct.is_some() {
+                    direct
+                } else if let Some(normalized) = normalized_packet.as_ref() {
+                    if normalized.as_slice() != packet {
+                        decoder.decode_into(normalized, &mut self.frame)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
             }
         };
         let Some(timings) = timings else {
             self.consecutive_empty_decodes = self.consecutive_empty_decodes.saturating_add(1);
+            #[cfg(target_os = "macos")]
+            if backend == DecodeBackendKind::VideoToolbox
+                && self.consecutive_empty_decodes <= VT_STALL_HEX_DUMP_LIMIT as u32
+            {
+                eprintln!(
+                    "output-helper: videotoolbox stall chunk={} empty_decodes={} head={}",
+                    self.video_chunks_in,
+                    self.consecutive_empty_decodes,
+                    hex_dump_prefix(packet, VT_STALL_HEX_DUMP_BYTES)
+                );
+            }
             #[cfg(target_os = "windows")]
             if backend == DecodeBackendKind::MfD3d11
                 && self.texture_fastpath_enabled
@@ -3735,6 +4053,28 @@ impl DecoderState {
                 self.consecutive_empty_decodes = 0;
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            if backend == DecodeBackendKind::VideoToolbox
+                && self.consecutive_empty_decodes >= VT_STALL_SWITCH_THRESHOLD
+            {
+                if vt_fallback_disabled() {
+                    eprintln!(
+                        "output-helper: videotoolbox stall detected for {} chunks; fallback suppressed by BROWSER_PORT_DISABLE_VT_FALLBACK=1",
+                        self.consecutive_empty_decodes
+                    );
+                    return;
+                }
+                eprintln!(
+                    "output-helper: videotoolbox stalled for {} chunks; fallback to openh264",
+                    self.consecutive_empty_decodes
+                );
+                self.decoder = None;
+                self.decode_preference = DecodeBackendPreference::OpenH264;
+                self.needs_keyframe = true;
+                self.consecutive_empty_decodes = 0;
+            }
+        }
         #[cfg(not(target_os = "windows"))]
         let _ = backend;
     }
@@ -3744,9 +4084,11 @@ impl DecoderState {
             for backend in preferred_backend_order(self.decode_preference) {
                 match create_decoder_backend(
                     backend,
+                    &self.h264,
                     #[cfg(target_os = "windows")]
                     self.preferred_dx11_device,
                     self.texture_fastpath_enabled,
+                    self.perf_config.verbose,
                 ) {
                     Ok(mut decoder) => {
                         decoder.set_texture_fastpath_enabled(self.texture_fastpath_enabled);
@@ -3774,14 +4116,22 @@ impl DecoderState {
 
 fn create_decoder_backend(
     backend: DecodeBackendKind,
+    h264: &H264Context,
     #[cfg(target_os = "windows")] preferred_dx11_device: Option<*mut std::ffi::c_void>,
     texture_fastpath_enabled: bool,
+    verbose: bool,
 ) -> anyhow::Result<Box<dyn VideoDecoder>> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = h264;
     #[cfg(not(target_os = "windows"))]
     let _ = texture_fastpath_enabled;
+    let _ = verbose;
     match backend {
         #[cfg(target_os = "macos")]
-        DecodeBackendKind::VideoToolbox => Ok(Box::new(VideoToolboxDecoder::new()?)),
+        DecodeBackendKind::VideoToolbox => Ok(Box::new(VideoToolboxDecoder::new(
+            h264.video_toolbox_config(),
+            verbose,
+        )?)),
         #[cfg(target_os = "windows")]
         DecodeBackendKind::MfD3d11 => Ok(Box::new(MfD3d11Decoder::new(
             preferred_dx11_device,
@@ -3856,12 +4206,22 @@ impl H264Context {
     }
 
     fn update_from_avcc_record(&mut self, record: &[u8]) -> bool {
-        let Some((nal_length_size, parameter_sets)) = parse_avcc_record(record) else {
+        let Some((nal_length_size, parameter_sets, _sps, _pps)) = parse_avcc_record(record) else {
             return false;
         };
         self.nal_length_size = Some(nal_length_size);
         self.parameter_sets = parameter_sets;
         true
+    }
+
+    fn video_toolbox_config(&self) -> Option<VideoToolboxH264Config> {
+        if self.parameter_sets.is_empty() {
+            return None;
+        }
+        Some(VideoToolboxH264Config {
+            nal_length_size: self.nal_length_size.unwrap_or(4).max(1).min(4),
+            parameter_sets: self.parameter_sets.clone(),
+        })
     }
 
     fn normalize_for_decode(&self, payload: &[u8], keyframe: bool) -> Option<Vec<u8>> {
@@ -3876,7 +4236,7 @@ impl H264Context {
         } else if let Some(best_effort) = best_effort_avcc_to_annexb(payload) {
             best_effort
         } else {
-            payload.to_vec()
+            return None;
         };
 
         if keyframe && !self.parameter_sets.is_empty() && !annexb_contains_sps_or_pps(&normalized) {
@@ -3885,9 +4245,36 @@ impl H264Context {
 
         Some(normalized)
     }
+
+    fn payload_contains_idr(&self, payload: &[u8]) -> bool {
+        self.payload_to_annexb(payload)
+            .map(|annexb| annexb_contains_idr(&annexb))
+            .unwrap_or(false)
+    }
+
+    fn payload_contains_parameter_sets(&self, payload: &[u8]) -> bool {
+        self.payload_to_annexb(payload)
+            .map(|annexb| annexb_contains_sps_or_pps(&annexb))
+            .unwrap_or(false)
+    }
+
+    fn payload_to_annexb(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        if payload.is_empty() {
+            return None;
+        }
+        if is_annexb(payload) {
+            return Some(payload.to_vec());
+        }
+        if let Some(nal_length_size) = self.nal_length_size {
+            if let Some(annexb) = avcc_to_annexb(payload, nal_length_size) {
+                return Some(annexb);
+            }
+        }
+        best_effort_avcc_to_annexb(payload)
+    }
 }
 
-fn parse_avcc_record(record: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
+fn parse_avcc_record(record: &[u8]) -> Option<(usize, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>)> {
     if record.len() < 7 || record[0] != 1 {
         return None;
     }
@@ -3901,11 +4288,11 @@ fn parse_avcc_record(record: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
     let sps_count = (record[offset] & 0x1F) as usize;
     offset += 1;
 
-    let mut parameter_sets = Vec::new();
+    let mut sps = Vec::new();
     for _ in 0..sps_count {
         let (unit, next_offset) = parse_avcc_unit(record, offset)?;
         if unit.first().map(|value| value & 0x1F) == Some(7) {
-            parameter_sets.push(unit.to_vec());
+            sps.push(unit.to_vec());
         }
         offset = next_offset;
     }
@@ -3916,15 +4303,19 @@ fn parse_avcc_record(record: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
     let pps_count = record[offset] as usize;
     offset += 1;
 
+    let mut pps = Vec::new();
     for _ in 0..pps_count {
         let (unit, next_offset) = parse_avcc_unit(record, offset)?;
         if unit.first().map(|value| value & 0x1F) == Some(8) {
-            parameter_sets.push(unit.to_vec());
+            pps.push(unit.to_vec());
         }
         offset = next_offset;
     }
 
-    Some((nal_length_size, parameter_sets))
+    let mut parameter_sets = Vec::with_capacity(sps.len() + pps.len());
+    parameter_sets.extend_from_slice(&sps);
+    parameter_sets.extend_from_slice(&pps);
+    Some((nal_length_size, parameter_sets, sps, pps))
 }
 
 fn parse_avcc_unit(record: &[u8], offset: usize) -> Option<(&[u8], usize)> {
@@ -3942,6 +4333,106 @@ fn parse_avcc_unit(record: &[u8], offset: usize) -> Option<(&[u8], usize)> {
 
 fn is_annexb(payload: &[u8]) -> bool {
     payload.starts_with(&[0, 0, 1]) || payload.starts_with(&[0, 0, 0, 1])
+}
+
+fn split_annexb_nals(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut units = Vec::new();
+    let mut index = 0_usize;
+    let mut saw_start_code = false;
+    while index + 3 <= payload.len() {
+        let start_code_len = if payload[index..].starts_with(&[0, 0, 1]) {
+            3
+        } else if payload[index..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            index += 1;
+            continue;
+        };
+        saw_start_code = true;
+        index += start_code_len;
+        if index >= payload.len() {
+            break;
+        }
+        let nal_start = index;
+        let mut nal_end = payload.len();
+        let mut scan = index;
+        while scan + 3 <= payload.len() {
+            if payload[scan..].starts_with(&[0, 0, 1]) || payload[scan..].starts_with(&[0, 0, 0, 1])
+            {
+                nal_end = scan;
+                break;
+            }
+            scan += 1;
+        }
+        if nal_end > nal_start {
+            units.push(payload[nal_start..nal_end].to_vec());
+        }
+        index = nal_end;
+    }
+    if saw_start_code && !units.is_empty() {
+        Some(units)
+    } else {
+        None
+    }
+}
+
+fn split_avcc_nals(payload: &[u8], nal_length_size: usize) -> Option<Vec<Vec<u8>>> {
+    if nal_length_size == 0 || nal_length_size > 4 {
+        return None;
+    }
+    let mut index = 0_usize;
+    let mut units = Vec::new();
+    while index < payload.len() {
+        if index + nal_length_size > payload.len() {
+            return None;
+        }
+        let mut nal_len = 0_usize;
+        for byte in &payload[index..index + nal_length_size] {
+            nal_len = (nal_len << 8) | usize::from(*byte);
+        }
+        index += nal_length_size;
+        if nal_len == 0 || index + nal_len > payload.len() {
+            return None;
+        }
+        units.push(payload[index..index + nal_len].to_vec());
+        index += nal_len;
+    }
+    if units.is_empty() {
+        None
+    } else {
+        Some(units)
+    }
+}
+
+fn h264_nal_units(payload: &[u8], nal_length_size: Option<usize>) -> Option<Vec<Vec<u8>>> {
+    if payload.is_empty() {
+        return None;
+    }
+    if is_annexb(payload) {
+        return split_annexb_nals(payload);
+    }
+    if let Some(nal_length_size) = nal_length_size {
+        if let Some(units) = split_avcc_nals(payload, nal_length_size) {
+            return Some(units);
+        }
+    }
+    for nal_length_size in [4_usize, 2, 1] {
+        if let Some(units) = split_avcc_nals(payload, nal_length_size) {
+            return Some(units);
+        }
+    }
+    None
+}
+
+fn h264_nal_types(payload: &[u8], nal_length_size: Option<usize>) -> Vec<u8> {
+    h264_nal_units(payload, nal_length_size)
+        .map(|units| {
+            units
+                .into_iter()
+                .filter_map(|unit| unit.first().copied().map(|value| value & 0x1F))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn avcc_to_annexb(payload: &[u8], nal_length_size: usize) -> Option<Vec<u8>> {
@@ -3984,6 +4475,81 @@ fn best_effort_avcc_to_annexb(payload: &[u8]) -> Option<Vec<u8>> {
         .find_map(|nal_length_size| avcc_to_annexb(payload, *nal_length_size))
 }
 
+fn hex_dump_prefix(payload: &[u8], limit: usize) -> String {
+    payload
+        .iter()
+        .take(limit)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn annexb_to_avcc(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + 32);
+    let mut index = 0_usize;
+    while index + 3 <= payload.len() {
+        let start_code_len = if payload[index..].starts_with(&[0, 0, 1]) {
+            3
+        } else if payload[index..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            index += 1;
+            continue;
+        };
+        index += start_code_len;
+        if index >= payload.len() {
+            break;
+        }
+        let nal_start = index;
+        let mut nal_end = payload.len();
+        let mut scan = index;
+        while scan + 3 <= payload.len() {
+            if payload[scan..].starts_with(&[0, 0, 1]) || payload[scan..].starts_with(&[0, 0, 0, 1])
+            {
+                nal_end = scan;
+                break;
+            }
+            scan += 1;
+        }
+        if nal_end <= nal_start {
+            index = nal_end;
+            continue;
+        }
+        let nal_size = nal_end - nal_start;
+        let nal_size_u32 = u32::try_from(nal_size).ok()?;
+        out.extend_from_slice(&nal_size_u32.to_be_bytes());
+        out.extend_from_slice(&payload[nal_start..nal_end]);
+        index = nal_end;
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn vt_prepare_sample_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.is_empty() {
+        return None;
+    }
+    if is_annexb(payload) {
+        return annexb_to_avcc(payload);
+    }
+    // Some streams use non-4-byte AVCC length fields. Normalize everything to
+    // 4-byte AVCC before handing off to VideoToolbox.
+    if avcc_to_annexb(payload, 4).is_some() {
+        return Some(payload.to_vec());
+    }
+    for nal_length_size in [2_usize, 1] {
+        if let Some(annexb) = avcc_to_annexb(payload, nal_length_size) {
+            if let Some(avcc4) = annexb_to_avcc(&annexb) {
+                return Some(avcc4);
+            }
+        }
+    }
+    None
+}
+
 fn annexb_contains_sps_or_pps(payload: &[u8]) -> bool {
     let mut index = 0_usize;
     while index + 3 <= payload.len() {
@@ -4001,6 +4567,29 @@ fn annexb_contains_sps_or_pps(payload: &[u8]) -> bool {
         }
         let nal_type = payload[index] & 0x1F;
         if nal_type == 7 || nal_type == 8 {
+            return true;
+        }
+    }
+    false
+}
+
+fn annexb_contains_idr(payload: &[u8]) -> bool {
+    let mut index = 0_usize;
+    while index + 3 <= payload.len() {
+        let start_code_len = if payload[index..].starts_with(&[0, 0, 1]) {
+            3
+        } else if payload[index..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            index += 1;
+            continue;
+        };
+        index += start_code_len;
+        if index >= payload.len() {
+            break;
+        }
+        let nal_type = payload[index] & 0x1F;
+        if nal_type == 5 {
             return true;
         }
     }
@@ -4065,9 +4654,10 @@ fn extract_annexb_parameter_sets(payload: &[u8]) -> Option<(Vec<Vec<u8>>, usize)
 #[cfg(test)]
 mod tests {
     use super::{
-        annexb_contains_sps_or_pps, avcc_to_annexb, is_annexb, parse_avcc_record,
-        parse_decode_backend_preference, preferred_backend_order, select_backend_with,
-        DecodeBackendKind, DecodeBackendPreference, H264Context,
+        annexb_contains_idr, annexb_contains_sps_or_pps, annexb_to_avcc, avcc_to_annexb,
+        h264_nal_types, is_annexb, parse_avcc_record, parse_decode_backend_preference,
+        preferred_backend_order, select_backend_with, vt_prepare_sample_payload, DecodeBackendKind,
+        DecodeBackendPreference, H264Context,
     };
 
     fn sample_avcc() -> Vec<u8> {
@@ -4106,10 +4696,12 @@ mod tests {
     #[test]
     fn avcc_record_parses_nal_length_and_parameter_sets() {
         let record = sample_avcc();
-        let (nal_length_size, parameter_sets) =
+        let (nal_length_size, parameter_sets, sps, pps) =
             parse_avcc_record(&record).expect("valid avcc record");
         assert_eq!(nal_length_size, 4);
         assert_eq!(parameter_sets.len(), 2);
+        assert_eq!(sps.len(), 1);
+        assert_eq!(pps.len(), 1);
         assert_eq!(parameter_sets[0][0] & 0x1F, 7);
         assert_eq!(parameter_sets[1][0] & 0x1F, 8);
     }
@@ -4129,11 +4721,75 @@ mod tests {
     }
 
     #[test]
+    fn annexb_payload_converts_to_avcc() {
+        let annexb = vec![0, 0, 0, 1, 0x65, 0x88, 0, 0, 1, 0x41, 0x99];
+        let avcc = annexb_to_avcc(&annexb).expect("annexb convert");
+        assert_eq!(avcc, vec![0, 0, 0, 2, 0x65, 0x88, 0, 0, 0, 2, 0x41, 0x99]);
+    }
+
+    #[test]
+    fn unknown_non_annexb_payload_is_not_normalized() {
+        let ctx = H264Context::default();
+        let payload = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        assert!(ctx.normalize_for_decode(&payload, false).is_none());
+    }
+
+    #[test]
     fn invalid_avcc_payload_is_rejected() {
         let mut ctx = H264Context::default();
         ctx.nal_length_size = Some(4);
         let invalid = vec![0, 0, 0, 5, 0x65, 0x88];
         assert!(ctx.normalize_for_decode(&invalid, true).is_none());
+    }
+
+    #[test]
+    fn annexb_idr_detection_works() {
+        let annexb_idr = vec![0, 0, 0, 1, 0x65, 0x88, 0, 0, 0, 1, 0x41, 0x99];
+        assert!(annexb_contains_idr(&annexb_idr));
+        let annexb_non_idr = vec![0, 0, 0, 1, 0x41, 0x88];
+        assert!(!annexb_contains_idr(&annexb_non_idr));
+    }
+
+    #[test]
+    fn payload_idr_detection_supports_avcc() {
+        let mut ctx = H264Context::default();
+        ctx.nal_length_size = Some(4);
+        let avcc_idr = vec![0, 0, 0, 2, 0x65, 0x88];
+        assert!(ctx.payload_contains_idr(&avcc_idr));
+        let avcc_non_idr = vec![0, 0, 0, 2, 0x41, 0x88];
+        assert!(!ctx.payload_contains_idr(&avcc_non_idr));
+    }
+
+    #[test]
+    fn payload_parameter_set_detection_supports_avcc() {
+        let mut ctx = H264Context::default();
+        ctx.nal_length_size = Some(4);
+        let avcc_sps = vec![0, 0, 0, 2, 0x67, 0x88];
+        assert!(ctx.payload_contains_parameter_sets(&avcc_sps));
+        let avcc_non_param = vec![0, 0, 0, 2, 0x41, 0x88];
+        assert!(!ctx.payload_contains_parameter_sets(&avcc_non_param));
+    }
+
+    #[test]
+    fn nal_type_summary_supports_annexb_and_avcc() {
+        let annexb = vec![0, 0, 0, 1, 0x67, 0x88, 0, 0, 0, 1, 0x65, 0x99];
+        assert_eq!(h264_nal_types(&annexb, None), vec![7, 5]);
+        let avcc = vec![0, 0, 0, 2, 0x67, 0x88, 0, 0, 0, 2, 0x65, 0x99];
+        assert_eq!(h264_nal_types(&avcc, Some(4)), vec![7, 5]);
+    }
+
+    #[test]
+    fn vt_prepare_accepts_annexb() {
+        let annexb = vec![0, 0, 0, 1, 0x65, 0x88];
+        let avcc = vt_prepare_sample_payload(&annexb).expect("vt sample payload");
+        assert_eq!(avcc, vec![0, 0, 0, 2, 0x65, 0x88]);
+    }
+
+    #[test]
+    fn vt_prepare_normalizes_two_byte_avcc_to_four_byte() {
+        let two_byte_avcc = vec![0, 2, 0x65, 0x88];
+        let normalized = vt_prepare_sample_payload(&two_byte_avcc).expect("vt sample payload");
+        assert_eq!(normalized, vec![0, 0, 0, 2, 0x65, 0x88]);
     }
 
     #[test]
@@ -4196,6 +4852,10 @@ struct OutputBackend {
     spout_dimensions: HashMap<u32, (usize, usize)>,
     #[cfg(target_os = "macos")]
     syphon: HashMap<u32, *mut BrowserPortSyphonSender>,
+    #[cfg(target_os = "macos")]
+    syphon_last_discovery_publish: HashMap<u32, Instant>,
+    #[cfg(target_os = "macos")]
+    syphon_has_real_frame: HashMap<u32, bool>,
     ndi: Option<NdiState>,
 }
 
@@ -4224,11 +4884,15 @@ impl OutputBackend {
             OutputMode::Syphon => {
                 #[cfg(target_os = "macos")]
                 {
-                    Ok(Self {
+                    let mut backend = Self {
                         mode,
                         syphon: HashMap::new(),
+                        syphon_last_discovery_publish: HashMap::new(),
+                        syphon_has_real_frame: HashMap::new(),
                         ndi: None,
-                    })
+                    };
+                    backend.ensure_static_syphon_senders();
+                    Ok(backend)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -4254,6 +4918,10 @@ impl OutputBackend {
                         spout_dimensions: HashMap::new(),
                         #[cfg(target_os = "macos")]
                         syphon: HashMap::new(),
+                        #[cfg(target_os = "macos")]
+                        syphon_last_discovery_publish: HashMap::new(),
+                        #[cfg(target_os = "macos")]
+                        syphon_has_real_frame: HashMap::new(),
                         ndi: Some(NdiState::new().context("failed to init ndi state")?),
                     })
                 }
@@ -4310,15 +4978,26 @@ impl OutputBackend {
         _coded_width: Option<usize>,
         _coded_height: Option<usize>,
     ) -> Option<*mut std::ffi::c_void> {
-        if self.mode != OutputMode::Spout {
-            return None;
+        match self.mode {
+            OutputMode::Spout => {
+                #[cfg(target_os = "windows")]
+                {
+                    return self.prime_spout_sender(_player_id, _coded_width, _coded_height);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    None
+                }
+            }
+            OutputMode::Syphon => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.prime_syphon_sender(_player_id, _coded_width, _coded_height);
+                }
+                None
+            }
+            OutputMode::Ndi => None,
         }
-        #[cfg(target_os = "windows")]
-        {
-            return self.prime_spout_sender(_player_id, _coded_width, _coded_height);
-        }
-        #[allow(unreachable_code)]
-        None
     }
 
     fn tick(&mut self) {
@@ -4326,6 +5005,12 @@ impl OutputBackend {
         {
             if self.mode == OutputMode::Spout {
                 self.send_spout_keepalive();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if self.mode == OutputMode::Syphon {
+                self.keepalive_static_syphon_senders();
             }
         }
     }
@@ -4354,11 +5039,16 @@ impl OutputBackend {
             OutputMode::Syphon => {
                 #[cfg(target_os = "macos")]
                 {
+                    if self.is_static_syphon_player(player_id) {
+                        return;
+                    }
                     if let Some(sender) = self.syphon.remove(&player_id) {
                         if !sender.is_null() {
                             unsafe { browser_port_syphon_destroy_sender(sender) };
                         }
                     }
+                    self.syphon_last_discovery_publish.remove(&player_id);
+                    self.syphon_has_real_frame.remove(&player_id);
                 }
             }
             OutputMode::Ndi => {}
@@ -4707,25 +5397,119 @@ impl OutputBackend {
     }
 
     #[cfg(target_os = "macos")]
+    fn is_static_syphon_player(&self, player_id: u32) -> bool {
+        SYPHON_STATIC_PLAYER_IDS.contains(&player_id)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ensure_static_syphon_senders(&mut self) {
+        for player_id in SYPHON_STATIC_PLAYER_IDS {
+            self.prime_syphon_sender(player_id, Some(640), Some(360));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn keepalive_static_syphon_senders(&mut self) {
+        for player_id in SYPHON_STATIC_PLAYER_IDS {
+            if self
+                .syphon_has_real_frame
+                .get(&player_id)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let should_publish = self
+                .syphon_last_discovery_publish
+                .get(&player_id)
+                .map(|last| last.elapsed() >= Duration::from_millis(1000))
+                .unwrap_or(true);
+            if should_publish {
+                self.prime_syphon_sender(player_id, Some(640), Some(360));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ensure_syphon_sender(&mut self, player_id: u32) -> *mut BrowserPortSyphonSender {
+        if let Some(existing) = self.syphon.get(&player_id).copied() {
+            if !existing.is_null() {
+                return existing;
+            }
+        }
+        let name = CString::new(format!("browser-port-syphon-{player_id}")).expect("valid cstring");
+        let sender = unsafe { browser_port_syphon_create_sender(name.as_ptr()) };
+        self.syphon.insert(player_id, sender);
+        sender
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prime_syphon_sender(
+        &mut self,
+        player_id: u32,
+        coded_width: Option<usize>,
+        coded_height: Option<usize>,
+    ) {
+        let sender = self.ensure_syphon_sender(player_id);
+        if sender.is_null() {
+            let native_reason = unsafe {
+                let ptr = browser_port_syphon_last_error();
+                if ptr.is_null() {
+                    None
+                } else {
+                    CStr::from_ptr(ptr).to_str().ok()
+                }
+            };
+            eprintln!(
+                "output-helper: syphon sender create failed player={} reason={}",
+                player_id,
+                native_reason.unwrap_or("(none)")
+            );
+            return;
+        }
+        let width = coded_width.filter(|v| *v > 0).unwrap_or(640);
+        let height = coded_height.filter(|v| *v > 0).unwrap_or(360);
+        let mut black = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+        let sent = unsafe {
+            browser_port_syphon_send_bgra(
+                sender,
+                black.as_mut_ptr(),
+                width.try_into().unwrap_or(u32::MAX),
+                height.try_into().unwrap_or(u32::MAX),
+            )
+        };
+        if sent {
+            self.syphon_last_discovery_publish
+                .insert(player_id, Instant::now());
+            self.syphon_has_real_frame.entry(player_id).or_insert(false);
+        } else {
+            let native_reason = unsafe {
+                let ptr = browser_port_syphon_last_error();
+                if ptr.is_null() {
+                    None
+                } else {
+                    CStr::from_ptr(ptr).to_str().ok()
+                }
+            };
+            eprintln!(
+                "output-helper: syphon sender prime failed player={} size={}x{} reason={}",
+                player_id,
+                width,
+                height,
+                native_reason.unwrap_or("(none)")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn send_syphon(&mut self, player_id: u32, frame: &DecodedFrame) -> VideoSendResult {
         let width = frame.width;
         let height = frame.height;
         if width == 0 || height == 0 {
             return VideoSendResult::not_sent();
         }
-        let sender = {
-            let entry = self.syphon.entry(player_id).or_insert_with(|| {
-                let name = CString::new(format!("browser-port-syphon-{player_id}"))
-                    .expect("valid cstring");
-                unsafe { browser_port_syphon_create_sender(name.as_ptr()) }
-            });
-            *entry
-        };
+        let sender = self.ensure_syphon_sender(player_id);
         if sender.is_null() {
-            return VideoSendResult::not_sent();
-        }
-        let client_count = unsafe { browser_port_syphon_client_count(sender) };
-        if client_count == 0 {
             return VideoSendResult::not_sent();
         }
         if let Some(pixel_buffer) = frame.cv_pixel_buffer.as_ref() {
@@ -4749,6 +5533,11 @@ impl OutputBackend {
                     native_reason.unwrap_or("(none)")
                 );
                 return VideoSendResult::not_sent();
+            }
+            if sent {
+                self.syphon_last_discovery_publish
+                    .insert(player_id, Instant::now());
+                self.syphon_has_real_frame.insert(player_id, true);
             }
             return VideoSendResult {
                 sent,
@@ -4787,6 +5576,9 @@ impl OutputBackend {
             );
             return VideoSendResult::not_sent();
         }
+        self.syphon_last_discovery_publish
+            .insert(player_id, Instant::now());
+        self.syphon_has_real_frame.insert(player_id, true);
         VideoSendResult {
             sent,
             path: SendPath::SyphonBgra,
@@ -4830,6 +5622,8 @@ impl Drop for OutputBackend {
                 unsafe { browser_port_syphon_destroy_sender(*sender) };
             }
             self.syphon.clear();
+            self.syphon_last_discovery_publish.clear();
+            self.syphon_has_real_frame.clear();
         }
     }
 }
