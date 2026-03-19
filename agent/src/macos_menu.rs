@@ -3,7 +3,7 @@ use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSVariableStatusItemLength,
 };
 use cocoa::base::{id, nil, NO, YES};
-use cocoa::foundation::NSString;
+use cocoa::foundation::{NSSize, NSString};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
@@ -14,13 +14,16 @@ use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 
 const REFRESH_INTERVAL_SECONDS: f64 = 1.0;
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray_icon.png");
+const TRAY_ICON_WIDTH: f64 = 24.0;
+const TRAY_ICON_HEIGHT: f64 = 18.0;
 
 struct TrayState {
     state: Arc<RwLock<SharedState>>,
     handle: Handle,
     bind_addr: String,
     stop: Arc<AtomicBool>,
-    status_item: id,
+    _status_item: id,
     player_item: id,
     syphon_item: id,
     ws_item: id,
@@ -39,12 +42,10 @@ impl TrayState {
             )
         });
 
-        let status_title = ns_string("BrowserPort");
         let player_title = ns_string(&format!("Players: {}", snapshot.0));
         let syphon_title = ns_string(&format!("Syphon: {}", format_connection_count(snapshot.1)));
         let ws_title = ns_string(&format!("WS: {}", snapshot.2));
 
-        let _: () = msg_send![self.status_item, setTitle: status_title];
         let _: () = msg_send![self.player_item, setTitle: player_title];
         let _: () = msg_send![self.syphon_item, setTitle: syphon_title];
         let _: () = msg_send![self.ws_item, setTitle: ws_title];
@@ -121,15 +122,47 @@ unsafe fn make_menu_item(title: &str, enabled: bool, target: id, action: Sel) ->
     item
 }
 
+unsafe fn load_tray_icon() -> id {
+    let data: id = msg_send![
+        class!(NSData),
+        dataWithBytes: TRAY_ICON_PNG.as_ptr()
+        length: TRAY_ICON_PNG.len()
+    ];
+    if data == nil {
+        return nil;
+    }
+
+    let image: id = msg_send![class!(NSImage), alloc];
+    let image: id = msg_send![image, initWithData: data];
+    if image == nil {
+        return nil;
+    }
+
+    let size = NSSize {
+        width: TRAY_ICON_WIDTH,
+        height: TRAY_ICON_HEIGHT,
+    };
+    let _: () = msg_send![image, setSize: size];
+    let _: () = msg_send![image, setTemplate: NO];
+    image
+}
+
 unsafe fn build_menu(controller: id) -> (id, id, id, id, id) {
     let menu: id = msg_send![class!(NSMenu), new];
     let status_item: id = msg_send![class!(NSStatusBar), systemStatusBar];
     let status_item: id = msg_send![status_item, statusItemWithLength: NSVariableStatusItemLength];
-    let status_title = ns_string("BrowserPort");
-    let _: () = msg_send![status_item, setTitle: status_title];
     let button: id = msg_send![status_item, button];
     if button != nil {
-        let _: () = msg_send![button, setTitle: status_title];
+        let icon = load_tray_icon();
+        if icon != nil {
+            let _: () = msg_send![button, setImage: icon];
+            let empty_title = ns_string("");
+            let _: () = msg_send![button, setTitle: empty_title];
+        } else {
+            let fallback_title = ns_string("BrowserPort");
+            let _: () = msg_send![button, setTitle: fallback_title];
+            let _: () = msg_send![status_item, setTitle: fallback_title];
+        }
     }
 
     let player_item = make_menu_item("Players: 0", false, nil, sel!(refreshMenu:));
@@ -173,7 +206,7 @@ pub fn run_menu_bar_app(
             handle,
             bind_addr,
             stop,
-            status_item,
+            _status_item: status_item,
             player_item,
             syphon_item,
             ws_item,
