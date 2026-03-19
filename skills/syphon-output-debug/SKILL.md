@@ -65,10 +65,10 @@ Then probe static senders:
 
 ```bash
 cd agent
-target/release/syphon_probe browser-port-syphon-1 3
-target/release/syphon_probe browser-port-syphon-2 3
-target/release/syphon_probe browser-port-syphon-3 3
-target/release/syphon_probe browser-port-syphon-4 3
+target/release/syphon_probe "Player 1" 3
+target/release/syphon_probe "Player 2" 3
+target/release/syphon_probe "Player 3" 3
+target/release/syphon_probe "Player 4" 3
 ```
 
 Note:

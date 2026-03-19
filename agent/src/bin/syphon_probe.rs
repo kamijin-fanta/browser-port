@@ -154,9 +154,7 @@ mod macos_probe {
     impl ProbeConfig {
         fn from_args() -> Self {
             let mut args = env::args().skip(1);
-            let sender_name = args
-                .next()
-                .unwrap_or_else(|| "browser-port-syphon-1".to_string());
+            let sender_name = args.next().unwrap_or_else(|| "Player 1".to_string());
             let timeout_secs = args
                 .next()
                 .and_then(|value| value.parse::<u64>().ok())

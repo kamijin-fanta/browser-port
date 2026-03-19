@@ -5598,7 +5598,7 @@ impl OutputBackend {
                 return existing;
             }
         }
-        let name = CString::new(format!("browser-port-syphon-{player_id}")).expect("valid cstring");
+        let name = CString::new(format!("Player {player_id}")).expect("valid cstring");
         let sender = unsafe { browser_port_syphon_create_sender(name.as_ptr()) };
         if sender.is_null() {
             eprintln!("output-helper: syphon sender create returned null player={player_id}");
