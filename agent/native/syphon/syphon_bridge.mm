@@ -3,6 +3,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <dispatch/dispatch.h>
 #include <simd/simd.h>
 
 #include "Syphon-Framework/SyphonServerMetalTypes.h"
@@ -13,6 +14,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string>
 
 namespace {
@@ -26,8 +28,22 @@ void clear_error() {
     g_last_error.clear();
 }
 
+bool syphon_native_verbose() {
+    const char *value = std::getenv("BROWSER_PORT_PERF_VERBOSE");
+    if (!value || !value[0]) {
+        return false;
+    }
+    return std::string(value) == "1" || std::string(value) == "true" ||
+           std::string(value) == "TRUE" || std::string(value) == "yes" ||
+           std::string(value) == "YES" || std::string(value) == "on" ||
+           std::string(value) == "ON";
+}
+
 void pump_runloop_once() {
-    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    // Syphon directory publication/lookup depends on the app's main runloop.
+    // output-helper sends frames from worker threads, so pumping only the current
+    // thread's runloop can leave senders undiscoverable.
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
 }
 
 id call_objc_id(id target, SEL selector) {
@@ -104,19 +120,67 @@ id<MTLRenderPipelineState> make_nv12_pipeline(id<MTLDevice> device) {
     NSBundle *bundle = [NSBundle bundleForClass:server_class];
     NSError *error = nil;
     id<MTLLibrary> defaultLibrary = [device newDefaultLibraryWithBundle:bundle error:&error];
-    if (!defaultLibrary) {
+    id<MTLFunction> vertexFunction = nil;
+    id<MTLFunction> fragmentFunction = nil;
+
+    if (defaultLibrary) {
+        vertexFunction = [defaultLibrary newFunctionWithName:@"textureToScreenVertexShader"];
+        fragmentFunction = [defaultLibrary newFunctionWithName:@"nv12ToBgraSamplingShader"];
+    }
+
+    // Fallback: compile a local NV12 shader when the bundled Syphon framework does not
+    // include our added fragment entrypoint yet.
+    if (!fragmentFunction) {
+        static NSString *const kFallbackNV12ShaderSource =
+            @"#include <metal_stdlib>\n"
+             "using namespace metal;\n"
+             "struct SYPHONTextureVertex { packed_float2 position; packed_float2 textureCoordinate; };\n"
+             "struct RasterizerData { float4 clipSpacePosition [[position]]; float2 textureCoordinate; };\n"
+             "vertex RasterizerData browserPortTextureVertexShader(uint vertexID [[vertex_id]],\n"
+             "  constant SYPHONTextureVertex *vertexArray [[buffer(0)]],\n"
+             "  constant uint2 *viewportSizePointer [[buffer(1)]]) {\n"
+             "  RasterizerData out;\n"
+             "  float2 pixelSpacePosition = float2(vertexArray[vertexID].position);\n"
+             "  float2 viewportSize = float2(*viewportSizePointer);\n"
+             "  out.clipSpacePosition.xy = pixelSpacePosition / (viewportSize / 2.0);\n"
+             "  out.clipSpacePosition.z = 0.0;\n"
+             "  out.clipSpacePosition.w = 1.0;\n"
+             "  out.textureCoordinate = float2(vertexArray[vertexID].textureCoordinate);\n"
+             "  return out;\n"
+             "}\n"
+             "fragment float4 browserPortNv12Fragment(RasterizerData in [[stage_in]],\n"
+             "  texture2d<float> lumaTexture [[texture(0)]],\n"
+             "  texture2d<float> chromaTexture [[texture(1)]]) {\n"
+             "  constexpr sampler textureSampler (mag_filter::linear, min_filter::linear, address::clamp_to_edge);\n"
+             "  float y = lumaTexture.sample(textureSampler, in.textureCoordinate).r - 0.0625;\n"
+             "  float2 uv = chromaTexture.sample(textureSampler, in.textureCoordinate).rg - float2(0.5, 0.5);\n"
+             "  float3 rgb = float3(\n"
+             "    1.1643 * y + 1.7927 * uv.y,\n"
+             "    1.1643 * y - 0.2132 * uv.x - 0.5329 * uv.y,\n"
+             "    1.1643 * y + 2.1124 * uv.x);\n"
+             "  return float4(clamp(rgb, 0.0, 1.0), 1.0);\n"
+             "}\n";
+        NSError *fallback_error = nil;
+        id<MTLLibrary> fallbackLibrary = [device newLibraryWithSource:kFallbackNV12ShaderSource
+                                                               options:nil
+                                                                 error:&fallback_error];
+        if (fallbackLibrary) {
+            if (!vertexFunction) {
+                vertexFunction = [fallbackLibrary newFunctionWithName:@"browserPortTextureVertexShader"];
+            }
+            fragmentFunction = [fallbackLibrary newFunctionWithName:@"browserPortNv12Fragment"];
+        } else if (fallback_error) {
+            set_error([[fallback_error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
+    if (!vertexFunction || !fragmentFunction) {
         if (error) {
             set_error([[error localizedDescription] UTF8String]);
         } else {
-            set_error("failed to load Syphon Metal library");
+            set_error("NV12 shader functions are unavailable");
         }
-        return nil;
-    }
-
-    id<MTLFunction> vertexFunction = [defaultLibrary newFunctionWithName:@"textureToScreenVertexShader"];
-    id<MTLFunction> fragmentFunction = [defaultLibrary newFunctionWithName:@"nv12ToBgraSamplingShader"];
-    if (!vertexFunction || !fragmentFunction) {
-        set_error("NV12 shader functions are unavailable");
         return nil;
     }
 
@@ -298,6 +362,17 @@ bool publish_texture_to_syphon(
     id<MTLTexture> texture,
     id<MTLCommandBuffer> command_buffer
 ) {
+    if (![NSThread isMainThread]) {
+        __block bool result = false;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            result = publish_texture_to_syphon(state, texture, command_buffer);
+        });
+        if (!result && g_last_error.empty()) {
+            set_error("Syphon publish failed on main queue");
+        }
+        return result;
+    }
+
     if (!state || !state->server || !state->queue) {
         set_error("invalid syphon sender state");
         return false;
@@ -325,11 +400,8 @@ bool publish_texture_to_syphon(
     );
 
     [command_buffer commit];
-
-    SEL publish_selector = sel_registerName("publish");
-    if ([state->server respondsToSelector:publish_selector]) {
-        call_objc_void(state->server, publish_selector);
-    }
+    // SyphonMetalServer publishes from the command buffer completion handler.
+    // Publishing early can expose an incomplete or still-cleared frame.
     pump_runloop_once();
 
     clear_error();
@@ -341,6 +413,17 @@ const char *browser_port_syphon_last_error() {
 }
 
 BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
+    if (![NSThread isMainThread]) {
+        __block BrowserPortSyphonSender *result = nullptr;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            result = browser_port_syphon_create_sender(name);
+        });
+        if (!result && g_last_error.empty()) {
+            set_error("failed to create syphon sender on main queue");
+        }
+        return result;
+    }
+
     @autoreleasepool {
         if (!ensure_syphon_runtime_loaded()) {
             return nullptr;
@@ -406,6 +489,10 @@ BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
             return nullptr;
         }
 
+        if (syphon_native_verbose()) {
+            fprintf(stderr, "output-helper: syphon sender native created name=%s state=%p\n", name, state);
+        }
+
         CVReturn cache_status = CVMetalTextureCacheCreate(
             kCFAllocatorDefault,
             nullptr,
@@ -421,10 +508,10 @@ BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
 
         state->nv12Pipeline = make_nv12_pipeline(state->device);
         if (!state->nv12Pipeline) {
-            CFRelease(state->textureCache);
-            state->textureCache = nullptr;
-            delete state;
-            return nullptr;
+            // Keep sender alive for BGRA publish paths even when NV12 shader isn't available.
+            // This avoids complete black output when only the optional NV12 conversion path fails.
+            fprintf(stderr, "browser-port syphon: NV12 pipeline unavailable (%s); using BGRA-only publish path\n", g_last_error.c_str());
+            clear_error();
         }
 
         state->texture = nil;
@@ -506,6 +593,9 @@ bool browser_port_syphon_send_bgra(
             set_error("invalid BGRA frame payload");
             return false;
         }
+        if (syphon_native_verbose()) {
+            fprintf(stderr, "output-helper: syphon native send bgra state=%p size=%ux%u\n", state, width, height);
+        }
         if (!browser_port_syphon_ensure_texture(state, width, height)) {
             set_error("failed to allocate sender texture");
             return false;
@@ -541,6 +631,18 @@ bool browser_port_syphon_send_cv_pixel_buffer(
         const OSType pixel_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
         const uint32_t width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
         const uint32_t height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
+        const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+        if (syphon_native_verbose()) {
+            fprintf(
+                stderr,
+                "output-helper: syphon native send cv pixel buffer state=%p size=%ux%u pixel_format=0x%08x plane_count=%zu\n",
+                state,
+                width,
+                height,
+                pixel_format,
+                plane_count
+            );
+        }
         if (width == 0 || height == 0) {
             set_error("invalid pixel buffer size");
             return false;
@@ -586,7 +688,7 @@ bool browser_port_syphon_send_cv_pixel_buffer(
             return false;
         }
         if (!state->nv12Pipeline) {
-            set_error("NV12 conversion pipeline is unavailable");
+            set_error("NV12 conversion pipeline is unavailable for non-BGRA pixel buffer");
             return false;
         }
 
@@ -685,6 +787,7 @@ void browser_port_syphon_destroy_sender(BrowserPortSyphonSender *state) {
         if (!state) {
             return;
         }
+        fprintf(stderr, "output-helper: syphon sender native destroy state=%p\n", state);
         if (state->server) {
             SEL stop_selector = sel_registerName("stop");
             if ([state->server respondsToSelector:stop_selector]) {
@@ -895,7 +998,11 @@ bool browser_port_syphon_client_receive_bgra(
 
         id texture = browser_port_syphon_client_texture(state, true);
         if (!texture) {
-            return false;
+            // Some runtimes keep hasNewFrame false while still exposing the current frame texture.
+            texture = browser_port_syphon_client_texture(state, false);
+            if (!texture) {
+                return false;
+            }
         }
 
         if (state->width == 0 || state->height == 0) {

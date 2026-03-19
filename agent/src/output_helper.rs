@@ -580,8 +580,7 @@ fn handle_text_message(
                     Err(err) => {
                         eprintln!(
                             "output-helper: failed to base64 decode H.264 config player={} err={}",
-                            player_id,
-                            err
+                            player_id, err
                         );
                         decoder.clear_avcc();
                     }
@@ -913,31 +912,25 @@ type OSStatus = i32;
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CFRetain(value: CFTypeRef) -> CFTypeRef;
+    static kCFAllocatorDefault: CFAllocatorRef;
     fn CFRelease(value: CFTypeRef);
 }
 
 #[cfg(target_os = "macos")]
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
+    fn CVPixelBufferRetain(pixel_buffer: CVPixelBufferRef) -> CVPixelBufferRef;
     fn CVPixelBufferGetWidth(pixel_buffer: CVPixelBufferRef) -> usize;
     fn CVPixelBufferGetHeight(pixel_buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetPixelFormatType(pixel_buffer: CVPixelBufferRef) -> u32;
+    fn CVPixelBufferGetPlaneCount(pixel_buffer: CVPixelBufferRef) -> usize;
     fn CVPixelBufferGetIOSurface(pixel_buffer: CVPixelBufferRef) -> *mut std::ffi::c_void;
     fn CVPixelBufferRelease(pixel_buffer: CVPixelBufferRef);
 }
 
 #[cfg(target_os = "macos")]
-#[link(name = "VideoToolbox", kind = "framework")]
+#[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
-    static kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder:
-        *const std::ffi::c_void;
-    static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:
-        *const std::ffi::c_void;
-    static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder:
-        *const std::ffi::c_void;
-    static kCVPixelBufferMetalCompatibilityKey: *const std::ffi::c_void;
-    static kCVPixelBufferIOSurfacePropertiesKey: *const std::ffi::c_void;
-    static kCVPixelBufferPixelFormatTypeKey: *const std::ffi::c_void;
     fn CMVideoFormatDescriptionCreateFromH264ParameterSets(
         allocator: CFAllocatorRef,
         parameter_set_count: usize,
@@ -957,6 +950,12 @@ extern "C" {
         flags: u32,
         block_buffer_out: *mut *mut std::ffi::c_void,
     ) -> OSStatus;
+    fn CMBlockBufferReplaceDataBytes(
+        source_bytes: *const std::ffi::c_void,
+        block_buffer: *mut std::ffi::c_void,
+        offset_into_destination: usize,
+        data_length: usize,
+    ) -> OSStatus;
     fn CMSampleBufferCreateReady(
         allocator: CFAllocatorRef,
         data_buffer: *mut std::ffi::c_void,
@@ -968,6 +967,20 @@ extern "C" {
         sample_size_array: *const usize,
         sample_buffer_out: *mut *mut std::ffi::c_void,
     ) -> OSStatus;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "VideoToolbox", kind = "framework")]
+extern "C" {
+    static kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder:
+        *const std::ffi::c_void;
+    static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:
+        *const std::ffi::c_void;
+    static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder:
+        *const std::ffi::c_void;
+    static kCVPixelBufferMetalCompatibilityKey: *const std::ffi::c_void;
+    static kCVPixelBufferIOSurfacePropertiesKey: *const std::ffi::c_void;
+    static kCVPixelBufferPixelFormatTypeKey: *const std::ffi::c_void;
     fn VTDecompressionSessionCreate(
         allocator: CFAllocatorRef,
         video_format_description: *mut std::ffi::c_void,
@@ -1042,8 +1055,8 @@ impl CvPixelBufferHandle {
         if raw.is_null() {
             return None;
         }
-        // CVPixelBuffer is toll-free bridged to CFType, so CFRetain keeps it alive across FFI.
-        let retained = CFRetain(raw as CFTypeRef) as CVPixelBufferRef;
+        // Retain the decoded pixel buffer so it survives after VideoToolbox returns.
+        let retained = CVPixelBufferRetain(raw);
         if retained.is_null() {
             return None;
         }
@@ -1193,18 +1206,32 @@ unsafe extern "C" fn video_toolbox_output_callback(
     _presentation_time_stamp: CMTime,
     _presentation_duration: CMTime,
 ) {
-    if decompression_output_ref_con.is_null() {
-        return;
-    }
-    let state_ptr = if source_frame_ref_con.is_null() {
+    eprintln!(
+        "output-helper: videotoolbox callback start status={status} source_frame_ref_con_null={} decompression_output_ref_con_null={} image_buffer_null={}",
+        source_frame_ref_con.is_null(),
+        decompression_output_ref_con.is_null(),
+        image_buffer.is_null()
+    );
+    let state_ptr = if !source_frame_ref_con.is_null() {
+        eprintln!("output-helper: videotoolbox callback using state=source_frame_ref_con");
+        source_frame_ref_con
+    } else if !decompression_output_ref_con.is_null() {
+        eprintln!("output-helper: videotoolbox callback using state=decompression_output_ref_con");
         decompression_output_ref_con
     } else {
-        source_frame_ref_con
+        eprintln!("output-helper: videotoolbox callback dropped because both state refs were null");
+        return;
     };
     let state = &mut *(state_ptr as *mut VideoToolboxOutputState);
     state.status = status;
     state.image_buffer_was_null = image_buffer.is_null();
     state.pixel_buffer = CvPixelBufferHandle::retain(image_buffer);
+    eprintln!(
+        "output-helper: videotoolbox callback wrote status={} image_buffer_null={} pixel_buffer_present={}",
+        state.status,
+        state.image_buffer_was_null,
+        state.pixel_buffer.is_some()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1256,6 +1283,51 @@ impl VideoToolboxDecoder {
 
     fn log_debug(&self, message: &str) {
         eprintln!("output-helper: videotoolbox {message}");
+    }
+
+    unsafe fn create_sample_block_buffer(
+        &self,
+        sample_payload: &[u8],
+    ) -> anyhow::Result<*mut std::ffi::c_void> {
+        let packet_len = sample_payload.len();
+        self.log_debug(&format!(
+            "about to create CMBlockBuffer with packet_len={packet_len}"
+        ));
+        let mut block: *mut std::ffi::c_void = std::ptr::null_mut();
+        let create_status = CMBlockBufferCreateWithMemoryBlock(
+            kCFAllocatorDefault,
+            std::ptr::null_mut(),
+            packet_len,
+            kCFAllocatorDefault,
+            std::ptr::null(),
+            0,
+            packet_len,
+            0,
+            &mut block,
+        );
+        self.log_debug(&format!(
+            "CMBlockBufferCreateWithMemoryBlock status={create_status} block_ok={}",
+            !block.is_null()
+        ));
+        if create_status != 0 || block.is_null() {
+            bail!("CMBlockBufferCreateWithMemoryBlock failed status={create_status}");
+        }
+
+        let replace_status = CMBlockBufferReplaceDataBytes(
+            sample_payload.as_ptr() as *const std::ffi::c_void,
+            block,
+            0,
+            packet_len,
+        );
+        self.log_debug(&format!(
+            "CMBlockBufferReplaceDataBytes status={replace_status} packet_len={packet_len}"
+        ));
+        if replace_status != 0 {
+            CFRelease(block as CFTypeRef);
+            bail!("CMBlockBufferReplaceDataBytes failed status={replace_status}");
+        }
+
+        Ok(block)
     }
 
     fn log_hardware_usage(&self, session: *mut std::ffi::c_void) {
@@ -1460,7 +1532,9 @@ impl VideoToolboxDecoder {
         }
         self.chunk_index = self.chunk_index.saturating_add(1);
         let nal_types = h264_nal_types(&sample_payload, Some(4));
-        let keyframe_by_nal = nal_types.iter().any(|nal| *nal == 5 || *nal == 7 || *nal == 8);
+        let keyframe_by_nal = nal_types
+            .iter()
+            .any(|nal| *nal == 5 || *nal == 7 || *nal == 8);
         self.log_debug(&format!(
             "decode chunk={} size={} nal_types={:?} keyframe_flag={} keyframe_by_nal={} sample_format=avcc4",
             self.chunk_index,
@@ -1476,27 +1550,7 @@ impl VideoToolboxDecoder {
                 hex_dump_prefix(&sample_payload, VT_STALL_HEX_DUMP_BYTES)
             ));
         }
-        let block = unsafe {
-            let mut block: *mut std::ffi::c_void = std::ptr::null_mut();
-            let status = CMBlockBufferCreateWithMemoryBlock(
-                std::ptr::null(),
-                sample_payload.as_ptr() as *mut std::ffi::c_void,
-                packet_len,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                packet_len,
-                0,
-                &mut block,
-            );
-            if status != 0 || block.is_null() {
-                bail!("CMBlockBufferCreateWithMemoryBlock failed status={status}");
-            }
-            self.log_debug(&format!(
-                "CMBlockBufferCreateWithMemoryBlock status={status} block_ok=true sample_size={packet_len}"
-            ));
-            block
-        };
+        let block = unsafe { self.create_sample_block_buffer(&sample_payload)? };
         let sample_buffer = unsafe {
             let mut sample_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
             let timing = CMSampleTimingInfo {
@@ -1519,6 +1573,7 @@ impl VideoToolboxDecoder {
                     epoch: 0,
                 },
             };
+            self.log_debug("about to create CMSampleBuffer");
             let status = CMSampleBufferCreateReady(
                 std::ptr::null(),
                 block,
@@ -1531,12 +1586,13 @@ impl VideoToolboxDecoder {
                 &packet_len as *const usize,
                 &mut sample_buffer,
             );
+            self.log_debug(&format!(
+                "CMSampleBufferCreateReady status={status} sample_buffer_ok={}",
+                !sample_buffer.is_null()
+            ));
             if status != 0 || sample_buffer.is_null() {
                 bail!("CMSampleBufferCreateReady failed status={status}");
             }
-            self.log_debug(&format!(
-                "CMSampleBufferCreateReady status={status} sample_buffer_ok=true sample_size={packet_len}"
-            ));
             sample_buffer
         };
 
@@ -1546,6 +1602,7 @@ impl VideoToolboxDecoder {
             image_buffer_was_null: false,
         };
         let mut info_flags = 0_u32;
+        self.log_debug("about to call VTDecompressionSessionDecodeFrame");
         let status = unsafe {
             VTDecompressionSessionDecodeFrame(
                 session,
@@ -1647,9 +1704,19 @@ impl VideoDecoder for VideoToolboxDecoder {
         let decode_elapsed = decode_started.elapsed();
         let width = unsafe { CVPixelBufferGetWidth(pixel_buffer.as_raw()) };
         let height = unsafe { CVPixelBufferGetHeight(pixel_buffer.as_raw()) };
-        if unsafe { CVPixelBufferGetIOSurface(pixel_buffer.as_raw()) }.is_null() {
+        let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(pixel_buffer.as_raw()) };
+        let plane_count = unsafe { CVPixelBufferGetPlaneCount(pixel_buffer.as_raw()) };
+        let iosurface_present =
+            unsafe { !CVPixelBufferGetIOSurface(pixel_buffer.as_raw()).is_null() };
+        if !iosurface_present {
             self.log_error_rate_limited("pixel buffer is not IOSurface-backed");
         }
+        self.log_debug(&format!(
+            "decoded pixel buffer width={} height={} pixel_format=0x{pixel_format:08x} plane_count={} iosurface_present={iosurface_present}",
+            width,
+            height,
+            plane_count
+        ));
         frame.width = width;
         frame.height = height;
         frame.crop_applied = false;
@@ -3598,11 +3665,15 @@ impl DecoderState {
             self.needs_keyframe = false;
         }
         let normalized_packet = match self.decoder.as_ref().map(|decoder| decoder.backend_kind()) {
-            Some(DecodeBackendKind::OpenH264) => self.h264.normalize_for_decode(packet, effective_keyframe),
+            Some(DecodeBackendKind::OpenH264) => {
+                self.h264.normalize_for_decode(packet, effective_keyframe)
+            }
             #[cfg(target_os = "macos")]
             Some(DecodeBackendKind::VideoToolbox) => None,
             #[cfg(target_os = "windows")]
-            Some(DecodeBackendKind::MfD3d11) => self.h264.normalize_for_decode(packet, effective_keyframe),
+            Some(DecodeBackendKind::MfD3d11) => {
+                self.h264.normalize_for_decode(packet, effective_keyframe)
+            }
             None => self.h264.normalize_for_decode(packet, effective_keyframe),
         };
 
@@ -4860,6 +4931,22 @@ struct OutputBackend {
 }
 
 impl OutputBackend {
+    #[cfg(target_os = "macos")]
+    fn static_syphon_senders_disabled() -> bool {
+        matches!(
+            std::env::var("BROWSER_PORT_DISABLE_STATIC_SYPHON_SENDERS")
+                .ok()
+                .as_deref(),
+            Some("1")
+                | Some("true")
+                | Some("TRUE")
+                | Some("yes")
+                | Some("YES")
+                | Some("on")
+                | Some("ON")
+        )
+    }
+
     fn new(mode: OutputMode) -> anyhow::Result<Self> {
         match mode {
             OutputMode::Spout => {
@@ -4891,7 +4978,13 @@ impl OutputBackend {
                         syphon_has_real_frame: HashMap::new(),
                         ndi: None,
                     };
-                    backend.ensure_static_syphon_senders();
+                    if Self::static_syphon_senders_disabled() {
+                        eprintln!(
+                            "output-helper: static syphon sender prime disabled via BROWSER_PORT_DISABLE_STATIC_SYPHON_SENDERS"
+                        );
+                    } else {
+                        backend.ensure_static_syphon_senders();
+                    }
                     Ok(backend)
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -5010,7 +5103,9 @@ impl OutputBackend {
         #[cfg(target_os = "macos")]
         {
             if self.mode == OutputMode::Syphon {
-                self.keepalive_static_syphon_senders();
+                if !Self::static_syphon_senders_disabled() {
+                    self.keepalive_static_syphon_senders();
+                }
             }
         }
     }
@@ -5403,6 +5498,9 @@ impl OutputBackend {
 
     #[cfg(target_os = "macos")]
     fn ensure_static_syphon_senders(&mut self) {
+        if Self::static_syphon_senders_disabled() {
+            return;
+        }
         for player_id in SYPHON_STATIC_PLAYER_IDS {
             self.prime_syphon_sender(player_id, Some(640), Some(360));
         }
@@ -5410,6 +5508,9 @@ impl OutputBackend {
 
     #[cfg(target_os = "macos")]
     fn keepalive_static_syphon_senders(&mut self) {
+        if Self::static_syphon_senders_disabled() {
+            return;
+        }
         for player_id in SYPHON_STATIC_PLAYER_IDS {
             if self
                 .syphon_has_real_frame
@@ -5439,6 +5540,9 @@ impl OutputBackend {
         }
         let name = CString::new(format!("browser-port-syphon-{player_id}")).expect("valid cstring");
         let sender = unsafe { browser_port_syphon_create_sender(name.as_ptr()) };
+        if sender.is_null() {
+            eprintln!("output-helper: syphon sender create returned null player={player_id}");
+        }
         self.syphon.insert(player_id, sender);
         sender
     }
@@ -5508,14 +5612,26 @@ impl OutputBackend {
         if width == 0 || height == 0 {
             return VideoSendResult::not_sent();
         }
+        let sender_was_cached = self
+            .syphon
+            .get(&player_id)
+            .copied()
+            .map(|sender| !sender.is_null())
+            .unwrap_or(false);
         let sender = self.ensure_syphon_sender(player_id);
         if sender.is_null() {
             return VideoSendResult::not_sent();
         }
         if let Some(pixel_buffer) = frame.cv_pixel_buffer.as_ref() {
-            let sent = unsafe {
-                browser_port_syphon_send_cv_pixel_buffer(sender, pixel_buffer.as_raw())
-            };
+            let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(pixel_buffer.as_raw()) };
+            let plane_count = unsafe { CVPixelBufferGetPlaneCount(pixel_buffer.as_raw()) };
+            let first_real_frame = !self
+                .syphon_has_real_frame
+                .get(&player_id)
+                .copied()
+                .unwrap_or(false);
+            let sent =
+                unsafe { browser_port_syphon_send_cv_pixel_buffer(sender, pixel_buffer.as_raw()) };
             if !sent {
                 let native_reason = unsafe {
                     let ptr = browser_port_syphon_last_error();
@@ -5538,6 +5654,12 @@ impl OutputBackend {
                 self.syphon_last_discovery_publish
                     .insert(player_id, Instant::now());
                 self.syphon_has_real_frame.insert(player_id, true);
+            }
+            if first_real_frame {
+                eprintln!(
+                    "output-helper: syphon first cv frame player={} size={}x{} pixel_format=0x{pixel_format:08x} plane_count={} sender_reused={}",
+                    player_id, width, height, plane_count, sender_was_cached
+                );
             }
             return VideoSendResult {
                 sent,
@@ -5578,7 +5700,18 @@ impl OutputBackend {
         }
         self.syphon_last_discovery_publish
             .insert(player_id, Instant::now());
+        let first_real_frame = !self
+            .syphon_has_real_frame
+            .get(&player_id)
+            .copied()
+            .unwrap_or(false);
         self.syphon_has_real_frame.insert(player_id, true);
+        if first_real_frame {
+            eprintln!(
+                "output-helper: syphon first bgra frame player={} size={}x{} sender_reused={}",
+                player_id, width, height, sender_was_cached
+            );
+        }
         VideoSendResult {
             sent,
             path: SendPath::SyphonBgra,
@@ -5619,6 +5752,9 @@ impl Drop for OutputBackend {
         #[cfg(target_os = "macos")]
         {
             for sender in self.syphon.values() {
+                if !sender.is_null() {
+                    eprintln!("output-helper: syphon sender destroy");
+                }
                 unsafe { browser_port_syphon_destroy_sender(*sender) };
             }
             self.syphon.clear();
