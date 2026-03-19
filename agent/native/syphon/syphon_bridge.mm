@@ -353,6 +353,15 @@ size_t browser_port_syphon_client_count(BrowserPortSyphonSender *state) {
     }
 }
 
+void *browser_port_syphon_sender_device(BrowserPortSyphonSender *state) {
+    @autoreleasepool {
+        if (!state || !state->device) {
+            return nullptr;
+        }
+        return (__bridge void *)state->device;
+    }
+}
+
 static bool browser_port_syphon_ensure_texture(BrowserPortSyphonSender *state, uint32_t width, uint32_t height) {
     if (!state || !state->device || width == 0 || height == 0) {
         return false;
@@ -421,6 +430,56 @@ bool browser_port_syphon_send_bgra(
             state->server,
             publish_frame_selector,
             state->texture,
+            command_buffer,
+            image_rect,
+            YES
+        );
+
+        [command_buffer commit];
+
+        SEL publish_selector = sel_registerName("publish");
+        if ([state->server respondsToSelector:publish_selector]) {
+            call_objc_void(state->server, publish_selector);
+        }
+        pump_runloop_once();
+
+        clear_error();
+        return true;
+    }
+}
+
+bool browser_port_syphon_send_metal_texture(
+    BrowserPortSyphonSender *state,
+    id<MTLTexture> texture
+) {
+    @autoreleasepool {
+        if (!state || !state->server || !state->queue) {
+            set_error("invalid syphon sender state");
+            return false;
+        }
+        if (!texture) {
+            set_error("invalid Metal texture payload");
+            return false;
+        }
+
+        id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
+        if (!command_buffer) {
+            set_error("failed to create command buffer");
+            return false;
+        }
+
+        SEL publish_frame_selector =
+            sel_registerName("publishFrameTexture:onCommandBuffer:imageRegion:flipped:");
+        if (![state->server respondsToSelector:publish_frame_selector]) {
+            set_error("Syphon server publishFrameTexture API is unavailable");
+            return false;
+        }
+
+        NSRect image_rect = NSMakeRect(0.0, 0.0, static_cast<CGFloat>(texture.width), static_cast<CGFloat>(texture.height));
+        call_objc_void_texture_publish(
+            state->server,
+            publish_frame_selector,
+            texture,
             command_buffer,
             image_rect,
             YES
