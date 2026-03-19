@@ -66,9 +66,12 @@ const MSG_TYPE_VIDEO: u8 = 1;
 const MSG_TYPE_AUDIO: u8 = 2;
 const FLAG_KEYFRAME: u8 = 0x01;
 const HELPER_STATS_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "windows")]
 const SPOUT_SEND_WARN_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(target_os = "windows")]
 const SPOUT_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(800);
 const PERF_EWMA_ALPHA: f64 = 0.2;
+#[cfg(target_os = "windows")]
 const MF_STALL_SWITCH_THRESHOLD: u32 = 180;
 const KEYFRAME_RESYNC_EMPTY_THRESHOLD: u32 = 45;
 const BACKLOG_SEVERE_THRESHOLD: u64 = 120;
@@ -82,6 +85,7 @@ const FASTPATH_HIGH_SEND_MS_THRESHOLD: f64 = 22.0;
 const FASTPATH_HIGH_SEND_STREAK_THRESHOLD: u32 = 8;
 const FASTPATH_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
 const FASTPATH_RECOVERY_STREAK_REQUIRED: u32 = 6;
+#[cfg(target_os = "windows")]
 const FASTPATH_DECODE_STALL_THRESHOLD: u32 = 24;
 const COMPRESSED_VIDEO_QUEUE_CAPACITY: usize = 4;
 const PIPELINE_TICK_INTERVAL: Duration = Duration::from_millis(4);
@@ -722,6 +726,7 @@ struct DecodeTimings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendPath {
     None,
+    #[cfg(target_os = "windows")]
     Bgra,
     Texture,
     Ndi,
@@ -733,6 +738,7 @@ impl SendPath {
     fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
+            #[cfg(target_os = "windows")]
             Self::Bgra => "bgra",
             Self::Texture => "texture",
             Self::Ndi => "ndi",
@@ -2543,12 +2549,14 @@ fn yuy2_to_bgra(src: &[u8], stride: usize, width: usize, height: usize, out: &mu
     }
 }
 
+#[cfg(target_os = "windows")]
 struct EffectiveOutputSize {
     width: usize,
     height: usize,
     crop_applied: bool,
 }
 
+#[cfg(target_os = "windows")]
 fn choose_effective_output_size(
     source_width: usize,
     source_height: usize,
@@ -3683,16 +3691,16 @@ impl OutputBackend {
 
     fn configure_player(
         &mut self,
-        player_id: u32,
-        coded_width: Option<usize>,
-        coded_height: Option<usize>,
+        _player_id: u32,
+        _coded_width: Option<usize>,
+        _coded_height: Option<usize>,
     ) -> Option<*mut std::ffi::c_void> {
         if self.mode != OutputMode::Spout {
             return None;
         }
         #[cfg(target_os = "windows")]
         {
-            return self.prime_spout_sender(player_id, coded_width, coded_height);
+            return self.prime_spout_sender(_player_id, _coded_width, _coded_height);
         }
         #[allow(unreachable_code)]
         None
@@ -3707,7 +3715,7 @@ impl OutputBackend {
         }
     }
 
-    fn clear_player(&mut self, player_id: u32, reason: &str) {
+    fn clear_player(&mut self, player_id: u32, _reason: &str) {
         match self.mode {
             OutputMode::Spout => {
                 #[cfg(target_os = "windows")]
@@ -3724,7 +3732,7 @@ impl OutputBackend {
                     self.spout_dimensions.remove(&player_id);
                     eprintln!(
                         "output-helper: cleared spout sender player={} reason={}",
-                        player_id, reason
+                        player_id, _reason
                     );
                 }
             }
@@ -4295,6 +4303,7 @@ struct NdiState;
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 impl NdiState {
+    #[allow(dead_code)]
     fn new() -> anyhow::Result<Self> {
         bail!("NDI is not available on this platform")
     }
