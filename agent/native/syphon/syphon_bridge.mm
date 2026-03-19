@@ -12,6 +12,7 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <limits.h>
+#include <atomic>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,16 @@
 
 namespace {
 thread_local std::string g_last_error;
+std::atomic<uint64_t> g_publish_main_direct_count{0};
+std::atomic<uint64_t> g_publish_dispatch_sync_count{0};
+std::atomic<uint64_t> g_publish_dispatch_async_count{0};
+std::atomic<uint64_t> g_runloop_pump_create_count{0};
+std::atomic<uint64_t> g_runloop_pump_discovery_count{0};
+std::atomic<uint64_t> g_runloop_pump_publish_count{0};
+std::atomic<uint64_t> g_runloop_pump_publish_skipped_count{0};
+std::atomic<uint64_t> g_texture_cache_flush_forced_count{0};
+std::atomic<uint64_t> g_texture_cache_flush_reconfig_count{0};
+std::atomic<uint64_t> g_texture_cache_flush_skipped_count{0};
 
 void set_error(const std::string &message) {
     g_last_error = message;
@@ -39,11 +50,85 @@ bool syphon_native_verbose() {
            std::string(value) == "ON";
 }
 
+bool env_bool_value(const char *key, bool default_value) {
+    const char *value = std::getenv(key);
+    if (!value || !value[0]) {
+        return default_value;
+    }
+    std::string normalized(value);
+    if (normalized == "1" || normalized == "true" || normalized == "TRUE" ||
+        normalized == "yes" || normalized == "YES" || normalized == "on" ||
+        normalized == "ON") {
+        return true;
+    }
+    if (normalized == "0" || normalized == "false" || normalized == "FALSE" ||
+        normalized == "no" || normalized == "NO" || normalized == "off" ||
+        normalized == "OFF") {
+        return false;
+    }
+    return default_value;
+}
+
+bool syphon_pump_every_frame_enabled() {
+    static bool configured = env_bool_value("BROWSER_PORT_SYPHON_PUMP_EVERY_FRAME", false);
+    return configured;
+}
+
+bool syphon_force_texture_cache_flush() {
+    static bool configured = env_bool_value("BROWSER_PORT_FORCE_TEXTURE_CACHE_FLUSH", false);
+    return configured;
+}
+
+void maybe_log_native_counters(const char *tag, uint64_t value) {
+    if (!syphon_native_verbose() || value == 0 || value % 120 != 0) {
+        return;
+    }
+    fprintf(
+        stderr,
+        "browser-port syphon: native counters tag=%s value=%llu main_direct=%llu dispatch_sync=%llu dispatch_async=%llu pump_create=%llu pump_discovery=%llu pump_publish=%llu pump_publish_skipped=%llu flush_forced=%llu flush_reconfig=%llu flush_skipped=%llu\n",
+        tag,
+        static_cast<unsigned long long>(value),
+        static_cast<unsigned long long>(g_publish_main_direct_count.load()),
+        static_cast<unsigned long long>(g_publish_dispatch_sync_count.load()),
+        static_cast<unsigned long long>(g_publish_dispatch_async_count.load()),
+        static_cast<unsigned long long>(g_runloop_pump_create_count.load()),
+        static_cast<unsigned long long>(g_runloop_pump_discovery_count.load()),
+        static_cast<unsigned long long>(g_runloop_pump_publish_count.load()),
+        static_cast<unsigned long long>(g_runloop_pump_publish_skipped_count.load()),
+        static_cast<unsigned long long>(g_texture_cache_flush_forced_count.load()),
+        static_cast<unsigned long long>(g_texture_cache_flush_reconfig_count.load()),
+        static_cast<unsigned long long>(g_texture_cache_flush_skipped_count.load())
+    );
+}
+
 void pump_runloop_once() {
     // Syphon directory publication/lookup depends on the app's main runloop.
     // output-helper sends frames from worker threads, so pumping only the current
     // thread's runloop can leave senders undiscoverable.
     [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+}
+
+void pump_runloop_for_sender_create() {
+    pump_runloop_once();
+    const uint64_t count = g_runloop_pump_create_count.fetch_add(1) + 1;
+    maybe_log_native_counters("pump_create", count);
+}
+
+void pump_runloop_for_discovery() {
+    pump_runloop_once();
+    const uint64_t count = g_runloop_pump_discovery_count.fetch_add(1) + 1;
+    maybe_log_native_counters("pump_discovery", count);
+}
+
+void maybe_pump_runloop_after_publish() {
+    if (!syphon_pump_every_frame_enabled()) {
+        const uint64_t count = g_runloop_pump_publish_skipped_count.fetch_add(1) + 1;
+        maybe_log_native_counters("pump_publish_skipped", count);
+        return;
+    }
+    pump_runloop_once();
+    const uint64_t count = g_runloop_pump_publish_count.fetch_add(1) + 1;
+    maybe_log_native_counters("pump_publish", count);
 }
 
 id call_objc_id(id target, SEL selector) {
@@ -203,7 +288,7 @@ id<MTLRenderPipelineState> make_nv12_pipeline(id<MTLDevice> device) {
 }
 
 NSArray *matching_servers(NSString *server_name) {
-    pump_runloop_once();
+    pump_runloop_for_discovery();
     if (!NSClassFromString(@"SyphonServerDirectory")) {
         set_error("Syphon runtime classes are unavailable");
         return nil;
@@ -363,6 +448,8 @@ bool publish_texture_to_syphon(
     id<MTLCommandBuffer> command_buffer
 ) {
     if (![NSThread isMainThread]) {
+        const uint64_t count = g_publish_dispatch_sync_count.fetch_add(1) + 1;
+        maybe_log_native_counters("dispatch_sync", count);
         __block bool result = false;
         dispatch_sync(dispatch_get_main_queue(), ^{
             result = publish_texture_to_syphon(state, texture, command_buffer);
@@ -372,6 +459,8 @@ bool publish_texture_to_syphon(
         }
         return result;
     }
+    const uint64_t direct_count = g_publish_main_direct_count.fetch_add(1) + 1;
+    maybe_log_native_counters("main_direct", direct_count);
 
     if (!state || !state->server || !state->queue) {
         set_error("invalid syphon sender state");
@@ -402,7 +491,7 @@ bool publish_texture_to_syphon(
     [command_buffer commit];
     // SyphonMetalServer publishes from the command buffer completion handler.
     // Publishing early can expose an incomplete or still-cleared frame.
-    pump_runloop_once();
+    maybe_pump_runloop_after_publish();
 
     clear_error();
     return true;
@@ -517,6 +606,7 @@ BrowserPortSyphonSender *browser_port_syphon_create_sender(const char *name) {
         state->texture = nil;
         state->width = 0;
         state->height = 0;
+        pump_runloop_for_sender_create();
         clear_error();
         return state;
     }
@@ -554,7 +644,15 @@ size_t browser_port_syphon_client_count(BrowserPortSyphonSender *state) {
     }
 }
 
-static bool browser_port_syphon_ensure_texture(BrowserPortSyphonSender *state, uint32_t width, uint32_t height) {
+static bool browser_port_syphon_ensure_texture(
+    BrowserPortSyphonSender *state,
+    uint32_t width,
+    uint32_t height,
+    bool *reconfigured
+) {
+    if (reconfigured) {
+        *reconfigured = false;
+    }
     if (!state || !state->device || width == 0 || height == 0) {
         return false;
     }
@@ -575,7 +673,36 @@ static bool browser_port_syphon_ensure_texture(BrowserPortSyphonSender *state, u
 
     state->width = width;
     state->height = height;
+    if (reconfigured) {
+        *reconfigured = true;
+    }
     return true;
+}
+
+void maybe_flush_texture_cache(BrowserPortSyphonSender *state, bool reconfigured, const char *path) {
+    if (!state || !state->textureCache) {
+        return;
+    }
+    if (syphon_force_texture_cache_flush()) {
+        CVMetalTextureCacheFlush(state->textureCache, 0);
+        const uint64_t count = g_texture_cache_flush_forced_count.fetch_add(1) + 1;
+        maybe_log_native_counters("flush_forced", count);
+        if (syphon_native_verbose()) {
+            fprintf(stderr, "browser-port syphon: texture cache flush forced path=%s\n", path);
+        }
+        return;
+    }
+    if (reconfigured) {
+        CVMetalTextureCacheFlush(state->textureCache, 0);
+        const uint64_t count = g_texture_cache_flush_reconfig_count.fetch_add(1) + 1;
+        maybe_log_native_counters("flush_reconfig", count);
+        if (syphon_native_verbose()) {
+            fprintf(stderr, "browser-port syphon: texture cache flush reconfigured path=%s\n", path);
+        }
+        return;
+    }
+    const uint64_t count = g_texture_cache_flush_skipped_count.fetch_add(1) + 1;
+    maybe_log_native_counters("flush_skipped", count);
 }
 
 bool browser_port_syphon_send_bgra(
@@ -596,7 +723,8 @@ bool browser_port_syphon_send_bgra(
         if (syphon_native_verbose()) {
             fprintf(stderr, "output-helper: syphon native send bgra state=%p size=%ux%u\n", state, width, height);
         }
-        if (!browser_port_syphon_ensure_texture(state, width, height)) {
+        bool texture_reconfigured = false;
+        if (!browser_port_syphon_ensure_texture(state, width, height, &texture_reconfigured)) {
             set_error("failed to allocate sender texture");
             return false;
         }
@@ -614,7 +742,9 @@ bool browser_port_syphon_send_bgra(
             return false;
         }
 
-        return publish_texture_to_syphon(state, state->texture, command_buffer);
+        bool sent = publish_texture_to_syphon(state, state->texture, command_buffer);
+        maybe_flush_texture_cache(state, texture_reconfigured, "bgra");
+        return sent;
     }
 }
 
@@ -647,7 +777,8 @@ bool browser_port_syphon_send_cv_pixel_buffer(
             set_error("invalid pixel buffer size");
             return false;
         }
-        if (!browser_port_syphon_ensure_texture(state, width, height)) {
+        bool texture_reconfigured = false;
+        if (!browser_port_syphon_ensure_texture(state, width, height, &texture_reconfigured)) {
             set_error("failed to allocate sender texture");
             return false;
         }
@@ -678,7 +809,7 @@ bool browser_port_syphon_send_cv_pixel_buffer(
             id<MTLTexture> source_texture = CVMetalTextureGetTexture(source_texture_ref);
             bool sent = source_texture ? publish_texture_to_syphon(state, source_texture, command_buffer) : false;
             CFRelease(source_texture_ref);
-            CVMetalTextureCacheFlush(state->textureCache, 0);
+            maybe_flush_texture_cache(state, texture_reconfigured, "cv-bgra");
             return sent;
         }
 
@@ -777,7 +908,7 @@ bool browser_port_syphon_send_cv_pixel_buffer(
         bool sent = publish_texture_to_syphon(state, state->texture, command_buffer);
         CFRelease(y_texture_ref);
         CFRelease(uv_texture_ref);
-        CVMetalTextureCacheFlush(state->textureCache, 0);
+        maybe_flush_texture_cache(state, texture_reconfigured, "cv-nv12");
         return sent;
     }
 }

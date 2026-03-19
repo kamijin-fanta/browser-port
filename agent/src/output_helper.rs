@@ -98,11 +98,13 @@ const FASTPATH_RECOVERY_STREAK_REQUIRED: u32 = 6;
 #[cfg(target_os = "windows")]
 const FASTPATH_DECODE_STALL_THRESHOLD: u32 = 24;
 const COMPRESSED_VIDEO_QUEUE_CAPACITY: usize = 4;
-const PIPELINE_TICK_INTERVAL: Duration = Duration::from_millis(4);
+const PIPELINE_TICK_INTERVAL_DEFAULT_MS: u64 = 8;
 const PLAYER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARENT_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "macos")]
 const SYPHON_STATIC_PLAYER_IDS: [u32; 4] = [1, 2, 3, 4];
+#[cfg(target_os = "macos")]
+const SYPHON_CLIENT_COUNT_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(target_os = "windows")]
 static MF_RUNTIME_REFS: AtomicUsize = AtomicUsize::new(0);
@@ -157,6 +159,15 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn pipeline_tick_interval() -> Duration {
+    let configured = std::env::var("BROWSER_PORT_PIPELINE_TICK_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value <= 1000)
+        .unwrap_or(PIPELINE_TICK_INTERVAL_DEFAULT_MS);
+    Duration::from_millis(configured)
 }
 
 #[cfg(target_os = "macos")]
@@ -256,9 +267,14 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
         OutputBackend::new(args.mode).context("failed to initialize output backend")?;
     let decode_preference = DecodeBackendPreference::from_env();
     let perf_config = OutputHelperPerfConfig::from_env();
+    let pipeline_tick_interval = pipeline_tick_interval();
     eprintln!(
         "output-helper: decode backend preference={}",
         decode_preference.as_str()
+    );
+    eprintln!(
+        "output-helper: pipeline tick interval={}ms",
+        pipeline_tick_interval.as_millis()
     );
     let mut decoders: HashMap<u32, DecoderState> = HashMap::new();
     let mut pending_video: HashMap<u32, VecDeque<PendingVideoChunk>> = HashMap::new();
@@ -298,7 +314,7 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
         ))
         .await
         .context("failed to send hello")?;
-        let mut pipeline_tick = tokio::time::interval(PIPELINE_TICK_INTERVAL);
+        let mut pipeline_tick = tokio::time::interval(pipeline_tick_interval);
         pipeline_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         pipeline_tick.tick().await;
 
@@ -5128,6 +5144,12 @@ struct OutputBackend {
     syphon_last_discovery_publish: HashMap<u32, Instant>,
     #[cfg(target_os = "macos")]
     syphon_has_real_frame: HashMap<u32, bool>,
+    #[cfg(target_os = "macos")]
+    syphon_last_client_count_check: HashMap<u32, Instant>,
+    #[cfg(target_os = "macos")]
+    syphon_cached_client_count: HashMap<u32, usize>,
+    #[cfg(target_os = "macos")]
+    syphon_no_client_skip_count: HashMap<u32, u64>,
     ndi: Option<NdiState>,
 }
 
@@ -5146,6 +5168,15 @@ impl OutputBackend {
                 | Some("on")
                 | Some("ON")
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn syphon_skip_publish_without_clients() -> bool {
+        std::env::var("BROWSER_PORT_SYPHON_SKIP_PUBLISH_WITHOUT_CLIENT")
+            .ok()
+            .as_deref()
+            .and_then(parse_env_bool)
+            .unwrap_or(true)
     }
 
     fn new(mode: OutputMode) -> anyhow::Result<Self> {
@@ -5177,6 +5208,9 @@ impl OutputBackend {
                         syphon: HashMap::new(),
                         syphon_last_discovery_publish: HashMap::new(),
                         syphon_has_real_frame: HashMap::new(),
+                        syphon_last_client_count_check: HashMap::new(),
+                        syphon_cached_client_count: HashMap::new(),
+                        syphon_no_client_skip_count: HashMap::new(),
                         ndi: None,
                     };
                     if Self::static_syphon_senders_disabled() {
@@ -5216,6 +5250,12 @@ impl OutputBackend {
                         syphon_last_discovery_publish: HashMap::new(),
                         #[cfg(target_os = "macos")]
                         syphon_has_real_frame: HashMap::new(),
+                        #[cfg(target_os = "macos")]
+                        syphon_last_client_count_check: HashMap::new(),
+                        #[cfg(target_os = "macos")]
+                        syphon_cached_client_count: HashMap::new(),
+                        #[cfg(target_os = "macos")]
+                        syphon_no_client_skip_count: HashMap::new(),
                         ndi: Some(NdiState::new().context("failed to init ndi state")?),
                     })
                 }
@@ -5345,6 +5385,9 @@ impl OutputBackend {
                     }
                     self.syphon_last_discovery_publish.remove(&player_id);
                     self.syphon_has_real_frame.remove(&player_id);
+                    self.syphon_last_client_count_check.remove(&player_id);
+                    self.syphon_cached_client_count.remove(&player_id);
+                    self.syphon_no_client_skip_count.remove(&player_id);
                 }
             }
             OutputMode::Ndi => {}
@@ -5749,6 +5792,48 @@ impl OutputBackend {
     }
 
     #[cfg(target_os = "macos")]
+    fn should_skip_syphon_publish_for_no_clients(
+        &mut self,
+        player_id: u32,
+        sender: *mut BrowserPortSyphonSender,
+    ) -> bool {
+        if !Self::syphon_skip_publish_without_clients() || sender.is_null() {
+            return false;
+        }
+        let now = Instant::now();
+        let should_refresh = self
+            .syphon_last_client_count_check
+            .get(&player_id)
+            .map(|last| now.duration_since(*last) >= SYPHON_CLIENT_COUNT_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if should_refresh {
+            let count = unsafe { browser_port_syphon_client_count(sender) as usize };
+            self.syphon_cached_client_count.insert(player_id, count);
+            self.syphon_last_client_count_check.insert(player_id, now);
+        }
+        let current_count = self
+            .syphon_cached_client_count
+            .get(&player_id)
+            .copied()
+            .unwrap_or(0);
+        if current_count > 0 {
+            return false;
+        }
+        let skipped = self
+            .syphon_no_client_skip_count
+            .entry(player_id)
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        if *skipped == 1 || *skipped % 120 == 0 {
+            eprintln!(
+                "output-helper: syphon publish skipped (no clients) player={} skipped_count={}",
+                player_id, skipped
+            );
+        }
+        true
+    }
+
+    #[cfg(target_os = "macos")]
     fn prime_syphon_sender(
         &mut self,
         player_id: u32,
@@ -5821,6 +5906,9 @@ impl OutputBackend {
             .unwrap_or(false);
         let sender = self.ensure_syphon_sender(player_id);
         if sender.is_null() {
+            return VideoSendResult::not_sent();
+        }
+        if self.should_skip_syphon_publish_for_no_clients(player_id, sender) {
             return VideoSendResult::not_sent();
         }
         if let Some(pixel_buffer) = frame.cv_pixel_buffer.as_ref() {
@@ -5961,6 +6049,9 @@ impl Drop for OutputBackend {
             self.syphon.clear();
             self.syphon_last_discovery_publish.clear();
             self.syphon_has_real_frame.clear();
+            self.syphon_last_client_count_check.clear();
+            self.syphon_cached_client_count.clear();
+            self.syphon_no_client_skip_count.clear();
         }
     }
 }
