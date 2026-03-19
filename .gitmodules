@@ -1,0 +1,3 @@
+[submodule "agent/native/spout/SPOUTSDK"]
+	path = agent/native/spout/SPOUTSDK
+	url = https://github.com/leadedge/Spout2.git

@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bp-bg: #000000;
+      --bp-panel: #101010;
+      --bp-panel-2: #161616;
+      --bp-panel-3: #1d1d1d;
+      --bp-border: #404040;
+      --bp-border-strong: #3a3a3a;
+      --bp-text: #e9e9e9;
+      --bp-text-muted: #9a9a9a;
+      --bp-text-soft: #c9c9c9;
+      --bp-accent: #4f87ff;
+      --bp-success: #52d273;
+      --bp-danger: #ff5f5f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body.bp-popup {
+      width: 420px;
+      margin: 0;
+      padding: 16px;
+      background: var(--bp-bg);
+      color: var(--bp-text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+    }
+
+    .bp-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+
+    .bp-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .bp-brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .bp-brand-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .bp-title {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--bp-text);
+      letter-spacing: 0.01em;
+    }
+
+    .bp-connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      font-size: 12px;
+      white-space: nowrap;
+      color: var(--bp-text-muted);
+    }
+
+    .bp-connection.is-connected {
+      color: var(--bp-success);
+    }
+
+    .bp-connection.is-disconnected {
+      color: var(--bp-danger);
+    }
+
+    .bp-connection__dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      flex: none;
+      background: #666;
+    }
+
+    .bp-connection__dot.is-connected {
+      background: var(--bp-success);
+    }
+
+    .bp-connection__dot.is-disconnected {
+      background: var(--bp-danger);
+    }
+
+    .bp-icon-button {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--bp-border);
+      border-radius: 4px;
+      background: var(--bp-panel-2);
+      color: var(--bp-text);
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .bp-icon-button:hover {
+      background: var(--bp-panel-3);
+      border-color: var(--bp-border-strong);
+    }
+
+    .bp-section-title {
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--bp-text-soft);
+    }
+
+    .bp-deck-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .bp-deck-card {
+      border: 1px solid var(--bp-border);
+      border-radius: 0;
+      background: var(--bp-panel);
+      overflow: hidden;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .bp-deck-card.is-active {
+      border-color: var(--bp-accent);
+      background: #141f32;
+    }
+
+    .bp-deck-card__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      width: 100%;
+      padding: 9px 10px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      outline: none;
+    }
+
+    .bp-deck-card__header:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .bp-deck-card__header:focus-visible {
+      box-shadow: inset 0 0 0 1px var(--bp-accent);
+    }
+
+    .bp-deck-card__label {
+      min-width: 95px;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--bp-text);
+    }
+
+    .bp-deck-card__status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 1;
+      justify-content: flex-end;
+      font-size: 12px;
+      color: var(--bp-text-muted);
+    }
+
+    .bp-deck-card__status.is-capturing {
+      color: var(--bp-success);
+    }
+
+    .bp-deck-card__status.is-error {
+      color: var(--bp-danger);
+    }
+
+    .bp-status-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      flex: none;
+      background: #666;
+    }
+
+    .bp-status-dot.is-idle {
+      background: #666;
+    }
+
+    .bp-status-dot.is-capturing {
+      background: var(--bp-success);
+    }
+
+    .bp-status-dot.is-error {
+      background: var(--bp-danger);
+    }
+
+    .bp-deck-card__details {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 7px 10px 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .bp-deck-card__summary {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--bp-text);
+    }
+
+    .bp-deck-card__title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: #9bb2d6;
+    }
+
+    .bp-overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      z-index: 999;
+      background: rgba(0, 0, 0, 0.82);
+      overflow: hidden;
+    }
+
+    .bp-overlay.is-open {
+      display: block;
+    }
+
+    .bp-overlay__panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      max-height: calc(100vh - 20px);
+      padding: 12px;
+      border: 1px solid var(--bp-border);
+      border-radius: 6px;
+      background: #111111;
+      overflow-y: auto;
+    }
+
+    .bp-overlay__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .bp-overlay__title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--bp-text);
+    }
+
+    .bp-overlay__actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .bp-form {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .bp-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .bp-field label {
+      font-size: 12px;
+      color: #8d9bb0;
+    }
+
+    .bp-field input,
+    .bp-field select {
+      width: 100%;
+      padding: 6px;
+      border: 1px solid var(--bp-border);
+      border-radius: 4px;
+      background: #0b0b0b;
+      color: var(--bp-text);
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .bp-field input:focus,
+    .bp-field select:focus {
+      outline: none;
+      border-color: var(--bp-accent);
+    }
+
+    .bp-field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .bp-field--inline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .bp-field--inline input {
+      flex: 1;
+    }
+
+    .bp-chip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .bp-button,
+    .bp-chip {
+      border: 1px solid var(--bp-border-strong);
+      background: var(--bp-panel-3);
+      color: var(--bp-text);
+      border-radius: 4px;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .bp-chip {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
+    .bp-button:hover,
+    .bp-chip:hover {
+      background: #2a2a2a;
+    }
+
+    .bp-button--ghost {
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+
+    .bp-button--primary {
+      padding: 6px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      border-color: #335fa5;
+      background: #1e3f76;
+      color: #fff;
+    }
+
+    .bp-button--primary:hover {
+      background: #25508f;
+    }
+
+    .bp-settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .bp-form-status {
+      min-height: 14px;
+      font-size: 12px;
+      color: #8d9bb0;
+    }
+
+    .bp-form-status.is-success {
+      color: var(--bp-success);
+    }
+
+    .bp-form-status.is-error {
+      color: var(--bp-danger);
+    }
+  </style>
+</head>
+<body class="bp-popup">
+  <div class="bp-shell">
+    <header class="bp-header">
+      <div class="bp-brand">
+        <div class="bp-brand-row">
+          <h1 class="bp-title">BrowserPort</h1>
+          <div id="browser-port-status" class="bp-connection is-disconnected">
+            <span id="browser-port-dot" class="bp-connection__dot is-disconnected"></span>
+            <span id="browser-port-text">接続確認中...</span>
+          </div>
+        </div>
+      </div>
+      <button id="open-settings" class="bp-icon-button" type="button" title="設定">⚙</button>
+    </header>
+
+    <section>
+      <div class="bp-section-title">プレイヤー状態</div>
+      <div id="players" class="bp-deck-list"></div>
+    </section>
+  </div>
+
+  <div id="settings-overlay" class="bp-overlay" aria-hidden="true">
+    <div class="bp-overlay__panel" role="dialog" aria-modal="true" aria-label="配信設定">
+      <div class="bp-overlay__header">
+        <div class="bp-overlay__title">配信設定</div>
+        <div class="bp-overlay__actions">
+          <button id="preset-default" class="bp-button bp-button--ghost" type="button">
+            デフォルト値
+          </button>
+          <button id="close-settings" class="bp-button bp-button--ghost" type="button">
+            閉じる
+          </button>
+        </div>
+      </div>
+
+      <form id="settings-form" class="bp-form">
+        <div class="bp-field">
+          <label for="ws-url">WS Address</label>
+          <input id="ws-url" type="text" autocomplete="off" required>
+        </div>
+
+        <div class="bp-field">
+          <label for="bitrate">bitrate (bps)</label>
+          <div class="bp-field--inline">
+            <input id="bitrate" type="number" min="100000" step="100000" required>
+            <div class="bp-chip-row">
+              <button class="bp-chip" type="button" data-preset="bitrate" data-value="5000000">
+                5M
+              </button>
+              <button class="bp-chip" type="button" data-preset="bitrate" data-value="10000000">
+                10M
+              </button>
+              <button class="bp-chip" type="button" data-preset="bitrate" data-value="30000000">
+                30M
+              </button>
+              <button class="bp-chip" type="button" data-preset="bitrate" data-value="50000000">
+                50M
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="bp-field">
+          <label for="target-fps">target fps</label>
+          <div class="bp-field--inline">
+            <input id="target-fps" type="number" min="1" max="240" step="1" required>
+            <div class="bp-chip-row">
+              <button class="bp-chip" type="button" data-preset="fps" data-value="24">24</button>
+              <button class="bp-chip" type="button" data-preset="fps" data-value="30">30</button>
+              <button class="bp-chip" type="button" data-preset="fps" data-value="60">60</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="bp-field-grid">
+          <div class="bp-field">
+            <label for="max-width">max width</label>
+            <input id="max-width" type="number" min="16" step="1" required>
+          </div>
+          <div class="bp-field">
+            <label for="max-height">max height</label>
+            <input id="max-height" type="number" min="16" step="1" required>
+          </div>
+        </div>
+        <div class="bp-chip-row">
+          <button class="bp-chip" type="button" data-preset="resolution" data-value="1600x900">
+            1600x900
+          </button>
+          <button class="bp-chip" type="button" data-preset="resolution" data-value="1920x1080">
+            1920x1080
+          </button>
+          <button class="bp-chip" type="button" data-preset="resolution" data-value="2560x1440">
+            2560x1440
+          </button>
+          <button class="bp-chip" type="button" data-preset="resolution" data-value="3840x2160">
+            3840x2160
+          </button>
+        </div>
+
+        <div class="bp-field">
+          <label for="latency-mode">latencyMode</label>
+          <select id="latency-mode">
+            <option value="realtime">realtime</option>
+            <option value="quality">quality</option>
+          </select>
+        </div>
+
+        <div class="bp-field">
+          <label for="hardware-acceleration">hardwareAcceleration</label>
+          <select id="hardware-acceleration">
+            <option value="prefer-hardware">prefer-hardware</option>
+            <option value="prefer-software">prefer-software</option>
+            <option value="no-preference">no-preference</option>
+          </select>
+        </div>
+
+        <div class="bp-field">
+          <label for="keyframe-interval">keyframeInterval</label>
+          <input id="keyframe-interval" type="number" min="1" step="1" required>
+        </div>
+
+        <div class="bp-settings-row">
+          <button id="save-settings" class="bp-button bp-button--primary" type="submit">
+            Save
+          </button>
+          <div id="settings-status" class="bp-form-status"></div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
