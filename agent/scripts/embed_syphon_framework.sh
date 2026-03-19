@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUBMODULE_DIR="${ROOT_DIR}/native/syphon/Syphon-Framework"
-DERIVED_DATA="${SUBMODULE_DIR}/.build"
+DERIVED_DATA="${ROOT_DIR}/target/syphon-xcodebuild"
 PRODUCTS_DIR="${DERIVED_DATA}/Build/Products/Release"
 FRAMEWORK_SRC="${PRODUCTS_DIR}/Syphon.framework"
 TARGET_DEBUG_FRAMEWORKS="${ROOT_DIR}/target/debug/Frameworks"
