@@ -13,7 +13,7 @@ fn build_windows_spout() {
     build.cpp(true);
     build.include("native/spout");
     build.include("native/spout/SPOUTSDK/SPOUTSDK");
-    build.include("native/spout/SPOUTSDK/SPOUTSDK/SpoutGL");
+    build.include("native/spout/SPOUTSDK/SPOUTSDK/SpoutDirectX/SpoutDX/Tutorial04_Lib/include");
     build.file("native/spout/spout_bridge.cpp");
     println!("cargo:rerun-if-changed=native/spout/spout_bridge.cpp");
 
@@ -21,7 +21,6 @@ fn build_windows_spout() {
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/Spout.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutCopy.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutDirectX.cpp",
-        "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutDX.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutFrameCount.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutGL.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutGLextensions.cpp",
@@ -30,6 +29,7 @@ fn build_windows_spout() {
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutSenderNames.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutSharedMemory.cpp",
         "native/spout/SPOUTSDK/SPOUTSDK/SpoutGL/SpoutUtils.cpp",
+        "native/spout/SPOUTSDK/SPOUTSDK/SpoutDirectX/SpoutDX/SpoutDX.cpp",
     ] {
         build.file(file);
         println!("cargo:rerun-if-changed={file}");
@@ -42,9 +42,7 @@ fn build_windows_spout() {
     }
     build.compile("browser_port_spout_bridge");
 
-    for lib in [
-        "OpenGL32", "User32", "Gdi32", "Dwmapi", "Dxgi", "D3D11", "D3D9", "Strmiids", "Shlwapi",
-    ] {
+    for lib in ["User32", "Gdi32", "Dwmapi", "Dxgi", "D3D11", "D3D9", "Strmiids", "Shlwapi"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 }

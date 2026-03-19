@@ -1,5 +1,5 @@
-#include "SpoutGL/SpoutDX.h"
-#include "SpoutGL/SpoutUtils.h"
+#include "SpoutDX.h"
+#include "SpoutUtils.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -313,7 +313,7 @@ bool browser_port_spout_debug_read_sender_bgra(
         set_last_error("invalid sender debug read arguments");
         return false;
     }
-    auto* source = state->sender->GetSharedTexture();
+    auto* source = state->sender->GetSenderTexture();
     auto* device = state->sender->GetDX11Device();
     auto* context = state->sender->GetDX11Context();
     if (!source || !device || !context) {
