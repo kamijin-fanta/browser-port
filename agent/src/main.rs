@@ -3,6 +3,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+#[cfg(target_os = "macos")]
+use std::ffi::{CStr, CString};
+#[cfg(target_os = "windows")]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,7 +90,7 @@ struct OutputFlags {
 impl Default for OutputFlags {
     fn default() -> Self {
         Self {
-            ndi_enabled: false,
+            ndi_enabled: true,
             spout_enabled: cfg!(target_os = "windows"),
             syphon_enabled: cfg!(target_os = "macos"),
         }
@@ -111,7 +114,6 @@ impl Default for OutputAvailability {
     }
 }
 
-#[derive(Default)]
 struct SharedState {
     connections: HashMap<ConnId, ConnectionHandle>,
     player_routes: HashMap<u32, ConnId>,
@@ -120,6 +122,26 @@ struct SharedState {
     syphon_client_count: usize,
     outputs: OutputFlags,
     output_availability: OutputAvailability,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        let output_availability = OutputAvailability::default();
+        let outputs = OutputFlags {
+            ndi_enabled: output_availability.ndi_available,
+            spout_enabled: output_availability.spout_available,
+            syphon_enabled: output_availability.syphon_available,
+        };
+        Self {
+            connections: HashMap::new(),
+            player_routes: HashMap::new(),
+            player_streams: HashMap::new(),
+            player_configs: HashMap::new(),
+            syphon_client_count: 0,
+            outputs,
+            output_availability,
+        }
+    }
 }
 
 impl SharedState {
@@ -1657,14 +1679,21 @@ fn detect_ndi_runtime() -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Library/NDI SDK for Apple/lib/macOS/libndi.dylib",
-            "/usr/local/lib/libndi.dylib",
-        ];
-        for candidate in candidates {
-            if Path::new(candidate).exists() {
-                return true;
+        let mut reasons = Vec::new();
+        for candidate in ndi_library_candidates_macos() {
+            match try_load_ndi_runtime_macos(&candidate) {
+                Ok(()) => {
+                    eprintln!("BrowserPort: detected NDI runtime path={candidate}");
+                    return true;
+                }
+                Err(reason) => reasons.push(format!("{candidate}: {reason}")),
             }
+        }
+        if !reasons.is_empty() {
+            eprintln!(
+                "BrowserPort: NDI runtime unavailable on macOS {}",
+                reasons.join(" | ")
+            );
         }
         return false;
     }
@@ -1673,6 +1702,43 @@ fn detect_ndi_runtime() -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ndi_library_candidates_macos() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push("/Library/NDI SDK for Apple/lib/macOS/libndi.dylib".to_string());
+    candidates.push("/usr/local/lib/libndi.dylib".to_string());
+    candidates.push("/opt/homebrew/lib/libndi.dylib".to_string());
+    candidates.push("libndi.dylib".to_string());
+    candidates.push("libndi.6.dylib".to_string());
+    candidates.push("libndi.5.dylib".to_string());
+    candidates.push("libndi.4.dylib".to_string());
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn try_load_ndi_runtime_macos(path: &str) -> Result<(), String> {
+    let c_path = CString::new(path).map_err(|_| "invalid dylib path".to_string())?;
+    unsafe {
+        libc::dlerror();
+        let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if handle.is_null() {
+            let err = libc::dlerror();
+            if err.is_null() {
+                return Err("dlopen failed with null error".to_string());
+            }
+            return Err(CStr::from_ptr(err).to_string_lossy().into_owned());
+        }
+        libc::dlclose(handle);
+    }
+    Ok(())
 }
 
 fn parse_env_bool(raw: &str) -> Option<bool> {

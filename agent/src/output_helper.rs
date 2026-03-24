@@ -18,7 +18,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::os::raw::c_char;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use std::ptr;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,6 +103,10 @@ const COMPRESSED_VIDEO_QUEUE_CAPACITY: usize = 4;
 const PIPELINE_TICK_INTERVAL_DEFAULT_MS: u64 = 8;
 const PLAYER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARENT_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const NDI_RECEIVER_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const NDI_NO_RECEIVER_LOG_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const VT_PIXEL_FORMAT_ENV: &str = "BROWSER_PORT_VT_PIXEL_FORMAT";
 #[cfg(target_os = "macos")]
 const SYPHON_STATIC_PLAYER_IDS: [u32; 4] = [1, 2, 3, 4];
 #[cfg(target_os = "macos")]
@@ -179,6 +183,18 @@ fn vt_fallback_disabled() -> bool {
         .as_deref()
         .and_then(parse_env_bool)
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn vt_prefers_nv12_output() -> bool {
+    match std::env::var(VT_PIXEL_FORMAT_ENV) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "nv12" | "420v" | "420f" => true,
+            "0" | "false" | "no" | "off" | "bgra" => false,
+            _ => false,
+        },
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +281,14 @@ struct PendingVideoChunk {
 }
 
 pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if args.mode == OutputMode::Ndi && std::env::var(VT_PIXEL_FORMAT_ENV).is_err() {
+        std::env::set_var(VT_PIXEL_FORMAT_ENV, "nv12");
+        eprintln!(
+            "output-helper: mode=ndi defaulting {}=nv12 for VideoToolbox output",
+            VT_PIXEL_FORMAT_ENV
+        );
+    }
     let mut backend =
         OutputBackend::new(args.mode).context("failed to initialize output backend")?;
     let decode_preference = DecodeBackendPreference::from_env();
@@ -387,6 +411,7 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
             }
 
             run_decode_stage(
+                &mut backend,
                 &mut decoders,
                 &mut pending_video,
                 &mut latest_decoded,
@@ -498,6 +523,7 @@ fn enqueue_video_chunk(
 }
 
 fn run_decode_stage(
+    backend: &mut OutputBackend,
     decoders: &mut HashMap<u32, DecoderState>,
     pending_video: &mut HashMap<u32, VecDeque<PendingVideoChunk>>,
     latest_decoded: &mut HashMap<u32, DecodedFrame>,
@@ -510,6 +536,25 @@ fn run_decode_stage(
         let decoder = decoders
             .entry(player_id)
             .or_insert_with(|| DecoderState::new(decode_preference, perf_config));
+
+        if backend.should_pause_decode(player_id) {
+            if let Some(queue) = pending_video.get_mut(&player_id) {
+                let dropped = queue.len() as u64;
+                if dropped > 0 {
+                    queue.clear();
+                    decoder.observe_pipeline_drop(dropped, "ndi-no-receiver");
+                }
+                should_remove_queue = queue.is_empty();
+            }
+            latest_decoded.remove(&player_id);
+            if !decoder.needs_keyframe {
+                decoder.request_keyframe_resync("ndi-no-receiver");
+            }
+            if should_remove_queue {
+                pending_video.remove(&player_id);
+            }
+            continue;
+        }
 
         if let Some(queue) = pending_video.get_mut(&player_id) {
             while let Some(chunk) = queue.pop_front() {
@@ -1024,6 +1069,8 @@ type CFTypeRef = *const std::ffi::c_void;
 type CFAllocatorRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type OSStatus = i32;
+#[cfg(target_os = "macos")]
+type CVOptionFlags = u64;
 
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -1035,9 +1082,29 @@ extern "C" {
 #[cfg(target_os = "macos")]
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
+    fn CVPixelBufferLockBaseAddress(
+        pixel_buffer: CVPixelBufferRef,
+        lock_flags: CVOptionFlags,
+    ) -> OSStatus;
+    fn CVPixelBufferUnlockBaseAddress(
+        pixel_buffer: CVPixelBufferRef,
+        unlock_flags: CVOptionFlags,
+    ) -> OSStatus;
     fn CVPixelBufferRetain(pixel_buffer: CVPixelBufferRef) -> CVPixelBufferRef;
+    fn CVPixelBufferGetBaseAddress(pixel_buffer: CVPixelBufferRef) -> *mut std::ffi::c_void;
+    fn CVPixelBufferGetBaseAddressOfPlane(
+        pixel_buffer: CVPixelBufferRef,
+        plane_index: usize,
+    ) -> *mut std::ffi::c_void;
+    fn CVPixelBufferGetBytesPerRow(pixel_buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetBytesPerRowOfPlane(
+        pixel_buffer: CVPixelBufferRef,
+        plane_index: usize,
+    ) -> usize;
     fn CVPixelBufferGetWidth(pixel_buffer: CVPixelBufferRef) -> usize;
     fn CVPixelBufferGetHeight(pixel_buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetWidthOfPlane(pixel_buffer: CVPixelBufferRef, plane_index: usize) -> usize;
+    fn CVPixelBufferGetHeightOfPlane(pixel_buffer: CVPixelBufferRef, plane_index: usize) -> usize;
     fn CVPixelBufferGetPixelFormatType(pixel_buffer: CVPixelBufferRef) -> u32;
     fn CVPixelBufferGetPlaneCount(pixel_buffer: CVPixelBufferRef) -> usize;
     fn CVPixelBufferGetIOSurface(pixel_buffer: CVPixelBufferRef) -> *mut std::ffi::c_void;
@@ -1144,6 +1211,12 @@ struct CMSampleTimingInfo {
 
 #[cfg(target_os = "macos")]
 const KCV_PIXELFORMAT_32_BGRA: u32 = 0x4247_5241;
+#[cfg(target_os = "macos")]
+const KCV_PIXELFORMAT_420YPCBCR8_BIPLANAR_VIDEO_RANGE: u32 = 0x3432_3076;
+#[cfg(target_os = "macos")]
+const KCV_PIXELFORMAT_420YPCBCR8_BIPLANAR_FULL_RANGE: u32 = 0x3432_3066;
+#[cfg(target_os = "macos")]
+const KCV_PIXELBUFFER_LOCK_READ_ONLY: CVOptionFlags = 1;
 
 #[cfg(target_os = "macos")]
 #[derive(Default)]
@@ -1597,18 +1670,26 @@ impl VideoToolboxDecoder {
             return Ok(false);
         }
 
+        let target_pixel_format = if vt_prefers_nv12_output() {
+            KCV_PIXELFORMAT_420YPCBCR8_BIPLANAR_VIDEO_RANGE
+        } else {
+            KCV_PIXELFORMAT_32_BGRA
+        };
         let output_attrs = unsafe {
             let dict = ns_mutable_dictionary();
             ns_dictionary_set(
                 dict,
                 kCVPixelBufferPixelFormatTypeKey,
-                ns_u32(KCV_PIXELFORMAT_32_BGRA),
+                ns_u32(target_pixel_format),
             );
             ns_dictionary_set(dict, kCVPixelBufferMetalCompatibilityKey, ns_bool(true));
             let empty_iosurface: id = msg_send![class!(NSMutableDictionary), dictionary];
             ns_dictionary_set(dict, kCVPixelBufferIOSurfacePropertiesKey, empty_iosurface);
             dict
         };
+        self.log_debug(&format!(
+            "VideoToolbox output pixel format requested=0x{target_pixel_format:08x}"
+        ));
 
         let decoder_spec = unsafe {
             let dict = ns_mutable_dictionary();
@@ -5230,7 +5311,7 @@ impl OutputBackend {
                 }
             }
             OutputMode::Ndi => {
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 {
                     Ok(Self {
                         mode,
@@ -5261,7 +5342,7 @@ impl OutputBackend {
                         ndi: Some(NdiState::new().context("failed to init ndi state")?),
                     })
                 }
-                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
                 {
                     bail!("ndi mode is not available on this platform in current build")
                 }
@@ -5293,9 +5374,9 @@ impl OutputBackend {
             }
             OutputMode::Ndi => {
                 if let Some(state) = self.ndi.as_mut() {
-                    state.send_video(player_id, frame.width, frame.height, &frame.bgra);
+                    let sent = state.send_video(player_id, frame);
                     VideoSendResult {
-                        sent: true,
+                        sent,
                         path: SendPath::Ndi,
                         spout_bridge_metrics: None,
                         texture_attempted: false,
@@ -5332,8 +5413,23 @@ impl OutputBackend {
                 }
                 None
             }
-            OutputMode::Ndi => None,
+            OutputMode::Ndi => {
+                if let Some(state) = self.ndi.as_mut() {
+                    state.ensure_sender(_player_id);
+                }
+                None
+            }
         }
+    }
+
+    fn should_pause_decode(&mut self, player_id: u32) -> bool {
+        if self.mode != OutputMode::Ndi {
+            return false;
+        }
+        self.ndi
+            .as_mut()
+            .map(|state| state.should_pause_decode(player_id))
+            .unwrap_or(false)
     }
 
     fn tick(&mut self) {
@@ -5401,6 +5497,9 @@ impl OutputBackend {
             return;
         }
         if let Some(state) = self.ndi.as_mut() {
+            if state.should_pause_decode(player_id) {
+                return;
+            }
             state.send_audio(player_id, payload);
         }
     }
@@ -6062,6 +6161,9 @@ impl Drop for OutputBackend {
 struct NdiRawSender {
     ptr: ndi::internal::bindings::NDIlib_send_instance_t,
     _name: CString,
+    last_receiver_check_at: Option<Instant>,
+    has_receivers: bool,
+    last_no_receiver_log_at: Option<Instant>,
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -6080,10 +6182,7 @@ impl NdiState {
         })
     }
 
-    fn get_sender(
-        &mut self,
-        player_id: u32,
-    ) -> Option<&ndi::internal::bindings::NDIlib_send_instance_t> {
+    fn get_sender_mut(&mut self, player_id: u32) -> Option<&mut NdiRawSender> {
         if !self.senders.contains_key(&player_id) {
             let name = CString::new(format!("browser-port-ndi-{player_id}")).ok()?;
             let settings = ndi::internal::bindings::NDIlib_send_create_t {
@@ -6096,15 +6195,69 @@ impl NdiState {
             if ptr.is_null() {
                 return None;
             }
-            self.senders
-                .insert(player_id, NdiRawSender { ptr, _name: name });
+            self.senders.insert(
+                player_id,
+                NdiRawSender {
+                    ptr,
+                    _name: name,
+                    last_receiver_check_at: None,
+                    has_receivers: true,
+                    last_no_receiver_log_at: None,
+                },
+            );
         }
-        self.senders.get(&player_id).map(|s| &s.ptr)
+        self.senders.get_mut(&player_id)
     }
 
-    fn send_video(&mut self, player_id: u32, width: usize, height: usize, bgra: &[u8]) {
-        let Some(sender) = self.get_sender(player_id) else {
-            return;
+    fn ensure_sender(&mut self, player_id: u32) -> bool {
+        self.get_sender_mut(player_id).is_some()
+    }
+
+    fn refresh_receiver_cache(sender: &mut NdiRawSender, player_id: u32) -> bool {
+        let now = Instant::now();
+        let needs_refresh = sender
+            .last_receiver_check_at
+            .map(|last| now.duration_since(last) >= NDI_RECEIVER_CHECK_INTERVAL)
+            .unwrap_or(true);
+        if needs_refresh {
+            let count = unsafe {
+                ndi::internal::bindings::NDIlib_send_get_no_connections(sender.ptr, 0) as i32
+            };
+            sender.has_receivers = count > 0;
+            sender.last_receiver_check_at = Some(now);
+            if !sender.has_receivers {
+                let should_log = sender
+                    .last_no_receiver_log_at
+                    .map(|last| now.duration_since(last) >= NDI_NO_RECEIVER_LOG_INTERVAL)
+                    .unwrap_or(true);
+                if should_log {
+                    sender.last_no_receiver_log_at = Some(now);
+                    eprintln!(
+                        "output-helper: ndi decode pause player={} receivers=0",
+                        player_id
+                    );
+                }
+            }
+        }
+        sender.has_receivers
+    }
+
+    fn should_pause_decode(&mut self, player_id: u32) -> bool {
+        let Some(sender) = self.get_sender_mut(player_id) else {
+            return false;
+        };
+        !Self::refresh_receiver_cache(sender, player_id)
+    }
+
+    fn send_video(&mut self, player_id: u32, frame: &DecodedFrame) -> bool {
+        let width = frame.width;
+        let height = frame.height;
+        let bgra = &frame.bgra;
+        if width == 0 || height == 0 || bgra.is_empty() {
+            return false;
+        }
+        let Some(sender) = self.get_sender_mut(player_id) else {
+            return false;
         };
         let mut bgrx = bgra.to_vec();
         for px in bgrx.chunks_exact_mut(4) {
@@ -6128,8 +6281,9 @@ impl NdiState {
             timestamp: ndi::internal::bindings::NDIlib_recv_timestamp_undefined,
         };
         unsafe {
-            ndi::internal::bindings::NDIlib_send_send_video_v2(*sender, &mut frame);
+            ndi::internal::bindings::NDIlib_send_send_video_v2(sender.ptr, &mut frame);
         }
+        true
     }
 
     fn send_audio(&mut self, player_id: u32, payload: &[u8]) {
@@ -6146,7 +6300,7 @@ impl NdiState {
         if payload.len() < 8 + expected_bytes {
             return;
         }
-        let Some(sender) = self.get_sender(player_id) else {
+        let Some(sender) = self.get_sender_mut(player_id) else {
             return;
         };
         let interleaved_bytes = &payload[8..8 + expected_bytes];
@@ -6174,7 +6328,7 @@ impl NdiState {
             timestamp: ndi::internal::bindings::NDIlib_recv_timestamp_undefined,
         };
         unsafe {
-            ndi::internal::bindings::NDIlib_send_send_audio_v2(*sender, &mut frame);
+            ndi::internal::bindings::NDIlib_send_send_audio_v2(sender.ptr, &mut frame);
         }
     }
 }
@@ -6190,17 +6344,952 @@ impl Drop for NdiState {
     }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+const NDI_FRAME_RATE_N: i32 = 60;
+#[cfg(target_os = "macos")]
+const NDI_FRAME_RATE_D: i32 = 1;
+#[cfg(target_os = "macos")]
+const NDI_TIMECODE_SYNTHESIZE: i64 = i64::MAX;
+#[cfg(target_os = "macos")]
+const NDI_TIMESTAMP_UNDEFINED: i64 = i64::MAX;
+#[cfg(target_os = "macos")]
+const NDI_FRAME_FORMAT_PROGRESSIVE: i32 = 1;
+#[cfg(target_os = "macos")]
+const NDI_STAGING_RING_SIZE: usize = 3;
+#[cfg(target_os = "macos")]
+const NDI_PATH_LOG_INTERVAL: Duration = Duration::from_secs(2);
+
+#[cfg(target_os = "macos")]
+const fn ndi_fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
+}
+
+#[cfg(target_os = "macos")]
+const NDI_FOURCC_NV12: u32 = ndi_fourcc(b'N', b'V', b'1', b'2');
+#[cfg(target_os = "macos")]
+const NDI_FOURCC_BGRA: u32 = ndi_fourcc(b'B', b'G', b'R', b'A');
+
+#[cfg(target_os = "macos")]
+type NdiSendInstanceT = *mut std::ffi::c_void;
+
+#[cfg(target_os = "macos")]
+type NdiInitializeFn = unsafe extern "C" fn() -> bool;
+#[cfg(target_os = "macos")]
+type NdiDestroyFn = unsafe extern "C" fn();
+#[cfg(target_os = "macos")]
+type NdiSendCreateFn = unsafe extern "C" fn(*const NdiSendCreateT) -> NdiSendInstanceT;
+#[cfg(target_os = "macos")]
+type NdiSendDestroyFn = unsafe extern "C" fn(NdiSendInstanceT);
+#[cfg(target_os = "macos")]
+type NdiSendVideoV2Fn = unsafe extern "C" fn(NdiSendInstanceT, *const NdiVideoFrameV2T);
+#[cfg(target_os = "macos")]
+type NdiSendVideoAsyncV2Fn = unsafe extern "C" fn(NdiSendInstanceT, *const NdiVideoFrameV2T);
+#[cfg(target_os = "macos")]
+type NdiSendAudioV2Fn = unsafe extern "C" fn(NdiSendInstanceT, *const NdiAudioFrameV2T);
+#[cfg(target_os = "macos")]
+type NdiSendGetNoConnectionsFn = unsafe extern "C" fn(NdiSendInstanceT, u32) -> i32;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NdiSendCreateT {
+    p_ndi_name: *const c_char,
+    p_groups: *const c_char,
+    clock_video: bool,
+    clock_audio: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+union NdiVideoFrameV2StrideOrDataSize {
+    line_stride_in_bytes: i32,
+    data_size_in_bytes: i32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_snake_case)]
+struct NdiVideoFrameV2T {
+    xres: i32,
+    yres: i32,
+    FourCC: u32,
+    frame_rate_N: i32,
+    frame_rate_D: i32,
+    picture_aspect_ratio: f32,
+    frame_format_type: i32,
+    timecode: i64,
+    p_data: *mut u8,
+    __bindgen_anon_1: NdiVideoFrameV2StrideOrDataSize,
+    p_metadata: *const c_char,
+    timestamp: i64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NdiAudioFrameV2T {
+    sample_rate: i32,
+    no_channels: i32,
+    no_samples: i32,
+    timecode: i64,
+    p_data: *mut f32,
+    channel_stride_in_bytes: i32,
+    p_metadata: *const c_char,
+    timestamp: i64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct NdiMacVideoSourceMeta {
+    pixel_format: Option<u32>,
+    plane_count: Option<usize>,
+    y_stride: Option<usize>,
+    uv_stride: Option<usize>,
+}
+
+#[cfg(target_os = "macos")]
+struct NdiPreparedVideoFrame {
+    frame: NdiVideoFrameV2T,
+    inflight_slot: Option<usize>,
+    inflight_cv: Option<NdiMacInFlightCvPixelBuffer>,
+    source_kind: &'static str,
+    used_staging_copy: bool,
+    source_meta: NdiMacVideoSourceMeta,
+}
+
+#[cfg(target_os = "macos")]
+struct NdiMacInFlightCvPixelBuffer {
+    pixel_buffer: CVPixelBufferRef,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NdiMacInFlightCvPixelBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(self.pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            CVPixelBufferRelease(self.pixel_buffer);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NdiDynamicApi {
+    library_handle: *mut std::ffi::c_void,
+    loaded_path: String,
+    initialize: NdiInitializeFn,
+    destroy: NdiDestroyFn,
+    send_create: NdiSendCreateFn,
+    send_destroy: NdiSendDestroyFn,
+    send_video_v2: NdiSendVideoV2Fn,
+    send_video_async_v2: Option<NdiSendVideoAsyncV2Fn>,
+    send_audio_v2: NdiSendAudioV2Fn,
+    send_get_no_connections: Option<NdiSendGetNoConnectionsFn>,
+}
+
+#[cfg(target_os = "macos")]
+struct NdiMacSender {
+    ptr: NdiSendInstanceT,
+    _name: CString,
+    staging_ring: Vec<Vec<u8>>,
+    staging_cursor: usize,
+    inflight_slot: Option<usize>,
+    inflight_cv: Option<NdiMacInFlightCvPixelBuffer>,
+    nv12_direct_count: u64,
+    nv12_staging_count: u64,
+    bgra_fallback_count: u64,
+    last_path_log_at: Option<Instant>,
+    last_receiver_check_at: Option<Instant>,
+    has_receivers: bool,
+    last_no_receiver_log_at: Option<Instant>,
+}
+
+#[cfg(target_os = "macos")]
+impl NdiMacSender {
+    fn new(ptr: NdiSendInstanceT, name: CString) -> Self {
+        let mut staging_ring = Vec::with_capacity(NDI_STAGING_RING_SIZE);
+        for _ in 0..NDI_STAGING_RING_SIZE {
+            staging_ring.push(Vec::new());
+        }
+        Self {
+            ptr,
+            _name: name,
+            staging_ring,
+            staging_cursor: 0,
+            inflight_slot: None,
+            inflight_cv: None,
+            nv12_direct_count: 0,
+            nv12_staging_count: 0,
+            bgra_fallback_count: 0,
+            last_path_log_at: None,
+            last_receiver_check_at: None,
+            has_receivers: true,
+            last_no_receiver_log_at: None,
+        }
+    }
+
+    fn refresh_receiver_cache(
+        &mut self,
+        player_id: u32,
+        send_get_no_connections: NdiSendGetNoConnectionsFn,
+    ) -> bool {
+        let now = Instant::now();
+        let needs_refresh = self
+            .last_receiver_check_at
+            .map(|last| now.duration_since(last) >= NDI_RECEIVER_CHECK_INTERVAL)
+            .unwrap_or(true);
+        if needs_refresh {
+            let count = unsafe { send_get_no_connections(self.ptr, 0) };
+            self.has_receivers = count > 0;
+            self.last_receiver_check_at = Some(now);
+            if !self.has_receivers {
+                let should_log = self
+                    .last_no_receiver_log_at
+                    .map(|last| now.duration_since(last) >= NDI_NO_RECEIVER_LOG_INTERVAL)
+                    .unwrap_or(true);
+                if should_log {
+                    self.last_no_receiver_log_at = Some(now);
+                    eprintln!(
+                        "output-helper: ndi decode pause player={} receivers=0",
+                        player_id
+                    );
+                }
+            }
+        }
+        self.has_receivers
+    }
+
+    fn select_staging_slot(&mut self) -> usize {
+        for _ in 0..self.staging_ring.len() {
+            let index = self.staging_cursor % self.staging_ring.len();
+            self.staging_cursor = (self.staging_cursor + 1) % self.staging_ring.len();
+            if self.inflight_slot != Some(index) {
+                return index;
+            }
+        }
+        0
+    }
+
+    fn sync_event_update_inflight(
+        &mut self,
+        inflight_slot: Option<usize>,
+        inflight_cv: Option<NdiMacInFlightCvPixelBuffer>,
+    ) {
+        self.inflight_slot = None;
+        self.inflight_cv = None;
+        self.inflight_slot = inflight_slot;
+        self.inflight_cv = inflight_cv;
+    }
+
+    fn release_all_inflight(&mut self) {
+        self.inflight_slot = None;
+        self.inflight_cv = None;
+    }
+
+    fn maybe_log_send_path(&mut self, player_id: u32, prepared: &NdiPreparedVideoFrame) {
+        let now = Instant::now();
+        let can_log = self
+            .last_path_log_at
+            .map(|at| now.duration_since(at) >= NDI_PATH_LOG_INTERVAL)
+            .unwrap_or(true);
+        if !can_log {
+            return;
+        }
+        self.last_path_log_at = Some(now);
+        eprintln!(
+            "output-helper: ndi send player={} path={} staging_copy={} pixel_format={} plane_count={} y_stride={} uv_stride={} counts={{nv12_direct:{},nv12_staging:{},bgra_fallback:{}}}",
+            player_id,
+            prepared.source_kind,
+            prepared.used_staging_copy,
+            prepared
+                .source_meta
+                .pixel_format
+                .map(|v| format!("0x{v:08x}"))
+                .unwrap_or_else(|| "(none)".to_string()),
+            prepared
+                .source_meta
+                .plane_count
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+            prepared
+                .source_meta
+                .y_stride
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+            prepared
+                .source_meta
+                .uv_stride
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+            self.nv12_direct_count,
+            self.nv12_staging_count,
+            self.bgra_fallback_count
+        );
+    }
+
+    fn prepare_nv12_from_pixel_buffer(
+        &mut self,
+        pixel_buffer: CVPixelBufferRef,
+        width: usize,
+        height: usize,
+    ) -> anyhow::Result<NdiPreparedVideoFrame> {
+        let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(pixel_buffer) };
+        let plane_count = unsafe { CVPixelBufferGetPlaneCount(pixel_buffer) };
+        if pixel_format != KCV_PIXELFORMAT_420YPCBCR8_BIPLANAR_VIDEO_RANGE
+            && pixel_format != KCV_PIXELFORMAT_420YPCBCR8_BIPLANAR_FULL_RANGE
+        {
+            bail!("pixel format is not NV12-compatible");
+        }
+        if plane_count != 2 {
+            bail!("unexpected NV12 plane count: {plane_count}");
+        }
+
+        let lock_status =
+            unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY) };
+        if lock_status != 0 {
+            bail!("CVPixelBufferLockBaseAddress failed status={lock_status}");
+        }
+
+        let y_base = unsafe { CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0) } as *const u8;
+        let uv_base = unsafe { CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1) } as *const u8;
+        let y_stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0) };
+        let uv_stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1) };
+        let y_width = unsafe { CVPixelBufferGetWidthOfPlane(pixel_buffer, 0) };
+        let y_height = unsafe { CVPixelBufferGetHeightOfPlane(pixel_buffer, 0) };
+        let uv_width = unsafe { CVPixelBufferGetWidthOfPlane(pixel_buffer, 1) };
+        let uv_height = unsafe { CVPixelBufferGetHeightOfPlane(pixel_buffer, 1) };
+
+        if y_base.is_null() || uv_base.is_null() {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!("NV12 plane base address is null");
+        }
+        if y_width == 0
+            || y_height == 0
+            || uv_width == 0
+            || uv_height == 0
+            || y_stride == 0
+            || uv_stride == 0
+        {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!("invalid NV12 plane geometry");
+        }
+        if y_width < width || y_height < height {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!(
+                "NV12 plane size smaller than frame y_plane={}x{} frame={}x{}",
+                y_width,
+                y_height,
+                width,
+                height
+            );
+        }
+
+        let expected_uv_width = width / 2;
+        let expected_uv_height = height / 2;
+        if uv_width < expected_uv_width || uv_height < expected_uv_height {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!(
+                "NV12 UV plane smaller than expected uv_plane={}x{} expected={}x{}",
+                uv_width,
+                uv_height,
+                expected_uv_width,
+                expected_uv_height
+            );
+        }
+
+        let y_plane_bytes = y_stride.saturating_mul(height);
+        let contiguous = y_stride == uv_stride
+            && unsafe { uv_base == y_base.add(y_plane_bytes) }
+            && uv_stride >= width;
+
+        if contiguous {
+            let retained = unsafe { CVPixelBufferRetain(pixel_buffer) };
+            if retained.is_null() {
+                unsafe {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+                }
+                bail!("CVPixelBufferRetain failed for NV12 direct path");
+            }
+            self.nv12_direct_count = self.nv12_direct_count.saturating_add(1);
+            return Ok(NdiPreparedVideoFrame {
+                frame: NdiVideoFrameV2T {
+                    xres: width as i32,
+                    yres: height as i32,
+                    FourCC: NDI_FOURCC_NV12,
+                    frame_rate_N: NDI_FRAME_RATE_N,
+                    frame_rate_D: NDI_FRAME_RATE_D,
+                    picture_aspect_ratio: width as f32 / height as f32,
+                    frame_format_type: NDI_FRAME_FORMAT_PROGRESSIVE,
+                    timecode: NDI_TIMECODE_SYNTHESIZE,
+                    p_data: y_base as *mut u8,
+                    __bindgen_anon_1: NdiVideoFrameV2StrideOrDataSize {
+                        line_stride_in_bytes: y_stride as i32,
+                    },
+                    p_metadata: ptr::null(),
+                    timestamp: NDI_TIMESTAMP_UNDEFINED,
+                },
+                inflight_slot: None,
+                inflight_cv: Some(NdiMacInFlightCvPixelBuffer {
+                    pixel_buffer: retained,
+                }),
+                source_kind: "nv12-direct",
+                used_staging_copy: false,
+                source_meta: NdiMacVideoSourceMeta {
+                    pixel_format: Some(pixel_format),
+                    plane_count: Some(plane_count),
+                    y_stride: Some(y_stride),
+                    uv_stride: Some(uv_stride),
+                },
+            });
+        }
+
+        if y_stride < width || uv_stride < width {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!("NV12 stride is smaller than width");
+        }
+        let slot_index = self.select_staging_slot();
+        let total_bytes = width.saturating_mul(height).saturating_mul(3) / 2;
+        let slot = self
+            .staging_ring
+            .get_mut(slot_index)
+            .expect("staging slot available");
+        if slot.len() != total_bytes {
+            slot.resize(total_bytes, 0);
+        }
+        let y_dst_size = width * height;
+        let (y_dst, uv_dst) = slot.split_at_mut(y_dst_size);
+        for row in 0..height {
+            let src = unsafe { std::slice::from_raw_parts(y_base.add(row * y_stride), width) };
+            let dst = &mut y_dst[row * width..(row + 1) * width];
+            dst.copy_from_slice(src);
+        }
+        for row in 0..(height / 2) {
+            let src = unsafe { std::slice::from_raw_parts(uv_base.add(row * uv_stride), width) };
+            let dst = &mut uv_dst[row * width..(row + 1) * width];
+            dst.copy_from_slice(src);
+        }
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+        }
+        self.nv12_staging_count = self.nv12_staging_count.saturating_add(1);
+        Ok(NdiPreparedVideoFrame {
+            frame: NdiVideoFrameV2T {
+                xres: width as i32,
+                yres: height as i32,
+                FourCC: NDI_FOURCC_NV12,
+                frame_rate_N: NDI_FRAME_RATE_N,
+                frame_rate_D: NDI_FRAME_RATE_D,
+                picture_aspect_ratio: width as f32 / height as f32,
+                frame_format_type: NDI_FRAME_FORMAT_PROGRESSIVE,
+                timecode: NDI_TIMECODE_SYNTHESIZE,
+                p_data: slot.as_mut_ptr(),
+                __bindgen_anon_1: NdiVideoFrameV2StrideOrDataSize {
+                    line_stride_in_bytes: width as i32,
+                },
+                p_metadata: ptr::null(),
+                timestamp: NDI_TIMESTAMP_UNDEFINED,
+            },
+            inflight_slot: Some(slot_index),
+            inflight_cv: None,
+            source_kind: "nv12-staging",
+            used_staging_copy: true,
+            source_meta: NdiMacVideoSourceMeta {
+                pixel_format: Some(pixel_format),
+                plane_count: Some(plane_count),
+                y_stride: Some(y_stride),
+                uv_stride: Some(uv_stride),
+            },
+        })
+    }
+
+    fn prepare_bgra_from_slice(
+        &mut self,
+        width: usize,
+        height: usize,
+        bgra: &[u8],
+        source_kind: &'static str,
+    ) -> anyhow::Result<NdiPreparedVideoFrame> {
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        if bgra.len() < expected {
+            bail!("bgra buffer is smaller than frame size");
+        }
+        let slot_index = self.select_staging_slot();
+        let slot = self
+            .staging_ring
+            .get_mut(slot_index)
+            .expect("staging slot available");
+        if slot.len() != expected {
+            slot.resize(expected, 0);
+        }
+        slot.copy_from_slice(&bgra[..expected]);
+        self.bgra_fallback_count = self.bgra_fallback_count.saturating_add(1);
+        Ok(NdiPreparedVideoFrame {
+            frame: NdiVideoFrameV2T {
+                xres: width as i32,
+                yres: height as i32,
+                FourCC: NDI_FOURCC_BGRA,
+                frame_rate_N: NDI_FRAME_RATE_N,
+                frame_rate_D: NDI_FRAME_RATE_D,
+                picture_aspect_ratio: width as f32 / height as f32,
+                frame_format_type: NDI_FRAME_FORMAT_PROGRESSIVE,
+                timecode: NDI_TIMECODE_SYNTHESIZE,
+                p_data: slot.as_mut_ptr(),
+                __bindgen_anon_1: NdiVideoFrameV2StrideOrDataSize {
+                    line_stride_in_bytes: (width * 4) as i32,
+                },
+                p_metadata: ptr::null(),
+                timestamp: NDI_TIMESTAMP_UNDEFINED,
+            },
+            inflight_slot: Some(slot_index),
+            inflight_cv: None,
+            source_kind,
+            used_staging_copy: true,
+            source_meta: NdiMacVideoSourceMeta {
+                pixel_format: None,
+                plane_count: None,
+                y_stride: Some(width * 4),
+                uv_stride: None,
+            },
+        })
+    }
+
+    fn prepare_bgra_from_pixel_buffer(
+        &mut self,
+        pixel_buffer: CVPixelBufferRef,
+        width: usize,
+        height: usize,
+    ) -> anyhow::Result<NdiPreparedVideoFrame> {
+        let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(pixel_buffer) };
+        let plane_count = unsafe { CVPixelBufferGetPlaneCount(pixel_buffer) };
+        if pixel_format != KCV_PIXELFORMAT_32_BGRA || plane_count != 0 {
+            bail!("pixel buffer is not BGRA fallback-compatible");
+        }
+        let lock_status =
+            unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY) };
+        if lock_status != 0 {
+            bail!("CVPixelBufferLockBaseAddress failed status={lock_status}");
+        }
+        let base = unsafe { CVPixelBufferGetBaseAddress(pixel_buffer) } as *const u8;
+        let stride = unsafe { CVPixelBufferGetBytesPerRow(pixel_buffer) };
+        if base.is_null() || stride < width * 4 {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+            }
+            bail!("BGRA pixel buffer base/stride invalid");
+        }
+        let slot_index = self.select_staging_slot();
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        let slot = self
+            .staging_ring
+            .get_mut(slot_index)
+            .expect("staging slot available");
+        if slot.len() != expected {
+            slot.resize(expected, 0);
+        }
+        for row in 0..height {
+            let src = unsafe { std::slice::from_raw_parts(base.add(row * stride), width * 4) };
+            let dst = &mut slot[row * width * 4..(row + 1) * width * 4];
+            dst.copy_from_slice(src);
+        }
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, KCV_PIXELBUFFER_LOCK_READ_ONLY);
+        }
+        self.bgra_fallback_count = self.bgra_fallback_count.saturating_add(1);
+        Ok(NdiPreparedVideoFrame {
+            frame: NdiVideoFrameV2T {
+                xres: width as i32,
+                yres: height as i32,
+                FourCC: NDI_FOURCC_BGRA,
+                frame_rate_N: NDI_FRAME_RATE_N,
+                frame_rate_D: NDI_FRAME_RATE_D,
+                picture_aspect_ratio: width as f32 / height as f32,
+                frame_format_type: NDI_FRAME_FORMAT_PROGRESSIVE,
+                timecode: NDI_TIMECODE_SYNTHESIZE,
+                p_data: slot.as_mut_ptr(),
+                __bindgen_anon_1: NdiVideoFrameV2StrideOrDataSize {
+                    line_stride_in_bytes: (width * 4) as i32,
+                },
+                p_metadata: ptr::null(),
+                timestamp: NDI_TIMESTAMP_UNDEFINED,
+            },
+            inflight_slot: Some(slot_index),
+            inflight_cv: None,
+            source_kind: "cv-bgra-fallback",
+            used_staging_copy: true,
+            source_meta: NdiMacVideoSourceMeta {
+                pixel_format: Some(pixel_format),
+                plane_count: Some(plane_count),
+                y_stride: Some(stride),
+                uv_stride: None,
+            },
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NdiState {
+    api: Option<NdiDynamicApi>,
+    senders: HashMap<u32, NdiMacSender>,
+}
+
+#[cfg(target_os = "macos")]
+fn ndi_library_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(value) = std::env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push("/Library/NDI SDK for Apple/lib/macOS/libndi.dylib".to_string());
+    candidates.push("/usr/local/lib/libndi.dylib".to_string());
+    candidates.push("/opt/homebrew/lib/libndi.dylib".to_string());
+    candidates.push("libndi.dylib".to_string());
+    candidates.push("libndi.6.dylib".to_string());
+    candidates.push("libndi.5.dylib".to_string());
+    candidates.push("libndi.4.dylib".to_string());
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn read_dlerror_message() -> String {
+    let err_ptr = libc::dlerror();
+    if err_ptr.is_null() {
+        return "(dlerror is null)".to_string();
+    }
+    CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ndi_dlopen(path: &str) -> anyhow::Result<*mut std::ffi::c_void> {
+    let c_path = CString::new(path).context("invalid library path string")?;
+    libc::dlerror();
+    let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+    if handle.is_null() {
+        let reason = read_dlerror_message();
+        bail!("dlopen failed path={} reason={}", path, reason);
+    }
+    Ok(handle)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ndi_dlsym_required<T: Copy>(
+    handle: *mut std::ffi::c_void,
+    symbol: &str,
+) -> anyhow::Result<T> {
+    let c_symbol = CString::new(symbol).context("invalid symbol name")?;
+    libc::dlerror();
+    let raw = libc::dlsym(handle, c_symbol.as_ptr());
+    if raw.is_null() {
+        let reason = read_dlerror_message();
+        bail!("dlsym failed symbol={} reason={}", symbol, reason);
+    }
+    Ok(std::mem::transmute_copy::<*mut std::ffi::c_void, T>(&raw))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ndi_dlsym_optional<T: Copy>(handle: *mut std::ffi::c_void, symbol: &str) -> Option<T> {
+    let c_symbol = CString::new(symbol).ok()?;
+    libc::dlerror();
+    let raw = libc::dlsym(handle, c_symbol.as_ptr());
+    if raw.is_null() {
+        return None;
+    }
+    Some(std::mem::transmute_copy::<*mut std::ffi::c_void, T>(&raw))
+}
+
+#[cfg(target_os = "macos")]
+impl NdiState {
+    fn new() -> anyhow::Result<Self> {
+        for candidate in ndi_library_candidates() {
+            let handle = match unsafe { ndi_dlopen(&candidate) } {
+                Ok(handle) => handle,
+                Err(err) => {
+                    eprintln!("output-helper: ndi runtime load failed {err}");
+                    continue;
+                }
+            };
+            let api = match unsafe {
+                let initialize: NdiInitializeFn = ndi_dlsym_required(handle, "NDIlib_initialize")?;
+                let destroy: NdiDestroyFn = ndi_dlsym_required(handle, "NDIlib_destroy")?;
+                let send_create: NdiSendCreateFn =
+                    ndi_dlsym_required(handle, "NDIlib_send_create")?;
+                let send_destroy: NdiSendDestroyFn =
+                    ndi_dlsym_required(handle, "NDIlib_send_destroy")?;
+                let send_video_v2: NdiSendVideoV2Fn =
+                    ndi_dlsym_required(handle, "NDIlib_send_send_video_v2")?;
+                let send_video_async_v2: Option<NdiSendVideoAsyncV2Fn> =
+                    ndi_dlsym_optional(handle, "NDIlib_send_send_video_async_v2")
+                        .or_else(|| ndi_dlsym_optional(handle, "NDIlib_send_send_video_v2_async"));
+                let send_audio_v2: NdiSendAudioV2Fn =
+                    ndi_dlsym_required(handle, "NDIlib_send_send_audio_v2")?;
+                let send_get_no_connections: Option<NdiSendGetNoConnectionsFn> =
+                    ndi_dlsym_optional(handle, "NDIlib_send_get_no_connections");
+                Ok::<NdiDynamicApi, anyhow::Error>(NdiDynamicApi {
+                    library_handle: handle,
+                    loaded_path: candidate.clone(),
+                    initialize,
+                    destroy,
+                    send_create,
+                    send_destroy,
+                    send_video_v2,
+                    send_video_async_v2,
+                    send_audio_v2,
+                    send_get_no_connections,
+                })
+            } {
+                Ok(api) => api,
+                Err(err) => {
+                    eprintln!("output-helper: ndi runtime symbol load failed {err}");
+                    unsafe {
+                        libc::dlclose(handle);
+                    }
+                    continue;
+                }
+            };
+            if !unsafe { (api.initialize)() } {
+                eprintln!(
+                    "output-helper: ndi runtime initialize failed path={}",
+                    api.loaded_path
+                );
+                unsafe {
+                    libc::dlclose(api.library_handle);
+                }
+                continue;
+            }
+            eprintln!(
+                "output-helper: ndi runtime loaded path={} async_send_available={}",
+                api.loaded_path,
+                api.send_video_async_v2.is_some()
+            );
+            return Ok(Self {
+                api: Some(api),
+                senders: HashMap::new(),
+            });
+        }
+        eprintln!("output-helper: ndi runtime unavailable on macos; ndi output disabled");
+        Ok(Self {
+            api: None,
+            senders: HashMap::new(),
+        })
+    }
+
+    fn get_sender(&mut self, player_id: u32) -> Option<&mut NdiMacSender> {
+        if self.api.is_none() {
+            return None;
+        }
+        if !self.senders.contains_key(&player_id) {
+            let name = CString::new(format!("browser-port-ndi-{player_id}")).ok()?;
+            let settings = NdiSendCreateT {
+                p_ndi_name: name.as_ptr(),
+                p_groups: ptr::null(),
+                clock_video: true,
+                clock_audio: true,
+            };
+            let sender_ptr = unsafe {
+                let api = self.api.as_ref()?;
+                (api.send_create)(&settings)
+            };
+            if sender_ptr.is_null() {
+                eprintln!("output-helper: ndi sender create failed player={player_id}");
+                return None;
+            }
+            eprintln!("output-helper: ndi sender created player={player_id}");
+            self.senders
+                .insert(player_id, NdiMacSender::new(sender_ptr, name));
+        }
+        self.senders.get_mut(&player_id)
+    }
+
+    fn ensure_sender(&mut self, player_id: u32) -> bool {
+        self.get_sender(player_id).is_some()
+    }
+
+    fn should_pause_decode(&mut self, player_id: u32) -> bool {
+        let send_get_no_connections = self
+            .api
+            .as_ref()
+            .and_then(|api| api.send_get_no_connections);
+        let Some(send_get_no_connections) = send_get_no_connections else {
+            return false;
+        };
+        let Some(sender) = self.get_sender(player_id) else {
+            return false;
+        };
+        !sender.refresh_receiver_cache(player_id, send_get_no_connections)
+    }
+
+    fn prepare_video_frame(
+        sender: &mut NdiMacSender,
+        frame: &DecodedFrame,
+    ) -> anyhow::Result<NdiPreparedVideoFrame> {
+        let width = frame.width;
+        let height = frame.height;
+        if width == 0 || height == 0 {
+            bail!("invalid frame size");
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(pixel_buffer) = frame.cv_pixel_buffer.as_ref() {
+            if let Ok(prepared) =
+                sender.prepare_nv12_from_pixel_buffer(pixel_buffer.as_raw(), width, height)
+            {
+                return Ok(prepared);
+            }
+            if let Ok(prepared) =
+                sender.prepare_bgra_from_pixel_buffer(pixel_buffer.as_raw(), width, height)
+            {
+                return Ok(prepared);
+            }
+        }
+        if !frame.bgra.is_empty() {
+            return sender.prepare_bgra_from_slice(width, height, &frame.bgra, "bgra-fallback");
+        }
+        bail!("no compatible video source for ndi send")
+    }
+
+    fn send_video(&mut self, player_id: u32, frame: &DecodedFrame) -> bool {
+        let (send_video_v2, send_video_async_v2) = match self.api.as_ref() {
+            Some(api) => (api.send_video_v2, api.send_video_async_v2),
+            None => return false,
+        };
+        let Some(sender) = self.get_sender(player_id) else {
+            return false;
+        };
+        let prepared = match Self::prepare_video_frame(sender, frame) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                eprintln!(
+                    "output-helper: ndi video prepare failed player={} reason={}",
+                    player_id, err
+                );
+                return false;
+            }
+        };
+
+        if let Some(async_send) = send_video_async_v2 {
+            unsafe {
+                async_send(sender.ptr, &prepared.frame);
+            }
+            sender.maybe_log_send_path(player_id, &prepared);
+            sender.sync_event_update_inflight(prepared.inflight_slot, prepared.inflight_cv);
+        } else {
+            unsafe {
+                send_video_v2(sender.ptr, &prepared.frame);
+            }
+            sender.maybe_log_send_path(player_id, &prepared);
+            sender.sync_event_update_inflight(None, None);
+        }
+        true
+    }
+
+    fn send_audio(&mut self, player_id: u32, payload: &[u8]) {
+        if payload.len() < 8 {
+            return;
+        }
+        let sample_rate = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let channels = u16::from_le_bytes([payload[4], payload[5]]) as usize;
+        let frame_count = u16::from_le_bytes([payload[6], payload[7]]) as usize;
+        if sample_rate == 0 || channels == 0 || frame_count == 0 {
+            return;
+        }
+        let expected_bytes = frame_count.saturating_mul(channels).saturating_mul(4);
+        if payload.len() < 8 + expected_bytes {
+            return;
+        }
+        let send_audio_v2 = match self.api.as_ref() {
+            Some(api) => api.send_audio_v2,
+            None => return,
+        };
+        let Some(sender) = self.get_sender(player_id) else {
+            return;
+        };
+        let interleaved_bytes = &payload[8..8 + expected_bytes];
+        let mut planar = vec![0_f32; frame_count * channels];
+        for i in 0..frame_count {
+            for ch in 0..channels {
+                let src_index = (i * channels + ch) * 4;
+                let sample = f32::from_le_bytes([
+                    interleaved_bytes[src_index],
+                    interleaved_bytes[src_index + 1],
+                    interleaved_bytes[src_index + 2],
+                    interleaved_bytes[src_index + 3],
+                ]);
+                planar[ch * frame_count + i] = sample;
+            }
+        }
+        let frame = NdiAudioFrameV2T {
+            sample_rate: sample_rate as i32,
+            no_channels: channels as i32,
+            no_samples: frame_count as i32,
+            timecode: NDI_TIMECODE_SYNTHESIZE,
+            p_data: planar.as_mut_ptr(),
+            channel_stride_in_bytes: (frame_count * 4) as i32,
+            p_metadata: ptr::null(),
+            timestamp: NDI_TIMESTAMP_UNDEFINED,
+        };
+        unsafe {
+            send_audio_v2(sender.ptr, &frame);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NdiState {
+    fn drop(&mut self) {
+        let Some(api) = self.api.as_ref() else {
+            return;
+        };
+        for sender in self.senders.values_mut() {
+            if let Some(async_send) = api.send_video_async_v2 {
+                unsafe {
+                    async_send(sender.ptr, ptr::null());
+                }
+            }
+            sender.release_all_inflight();
+            unsafe {
+                (api.send_destroy)(sender.ptr);
+            }
+        }
+        self.senders.clear();
+        unsafe {
+            (api.destroy)();
+            libc::dlclose(api.library_handle);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 struct NdiState;
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 impl NdiState {
     #[allow(dead_code)]
     fn new() -> anyhow::Result<Self> {
         bail!("NDI is not available on this platform")
     }
 
-    fn send_video(&mut self, _player_id: u32, _width: usize, _height: usize, _bgra: &[u8]) {}
+    fn ensure_sender(&mut self, _player_id: u32) -> bool {
+        false
+    }
+
+    fn should_pause_decode(&mut self, _player_id: u32) -> bool {
+        false
+    }
+
+    fn send_video(&mut self, _player_id: u32, _frame: &DecodedFrame) -> bool {
+        false
+    }
 
     fn send_audio(&mut self, _player_id: u32, _payload: &[u8]) {}
 }
