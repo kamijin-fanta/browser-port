@@ -432,6 +432,7 @@ pub async fn run(args: OutputHelperArgs) -> anyhow::Result<()> {
                     &mut ws,
                     args.mode,
                     &decoders,
+                    &backend,
                     backend.syphon_client_count(),
                     perf_config.verbose,
                 )
@@ -763,6 +764,7 @@ async fn send_helper_stats<S>(
     ws: &mut S,
     mode: OutputMode,
     decoders: &HashMap<u32, DecoderState>,
+    backend: &OutputBackend,
     syphon_client_count: usize,
     verbose: bool,
 ) where
@@ -771,6 +773,8 @@ async fn send_helper_stats<S>(
     let mut players = Vec::with_capacity(decoders.len());
     for (player_id, decoder) in decoders {
         let perf = decoder.perf_metrics();
+        let ndi_receivers = backend.ndi_player_receivers(*player_id);
+        let syphon_clients = backend.syphon_player_clients(*player_id);
         players.push(serde_json::json!({
             "playerId": player_id,
             "decodeBackend": perf.backend,
@@ -796,6 +800,10 @@ async fn send_helper_stats<S>(
             "cropApplied": perf.crop_applied,
             "effectiveWidth": perf.effective_width,
             "effectiveHeight": perf.effective_height,
+            "ndiConnected": ndi_receivers.map(|count| count > 0),
+            "ndiReceivers": ndi_receivers,
+            "syphonConnected": syphon_clients.map(|count| count > 0),
+            "syphonClients": syphon_clients,
         }));
         if verbose {
             eprintln!(
@@ -6123,6 +6131,26 @@ impl OutputBackend {
     fn syphon_client_count(&self) -> usize {
         0
     }
+
+    fn ndi_player_receivers(&self, player_id: u32) -> Option<u64> {
+        self.ndi
+            .as_ref()
+            .and_then(|state| state.receiver_count(player_id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn syphon_player_clients(&self, player_id: u32) -> Option<u64> {
+        let sender = self.syphon.get(&player_id).copied()?;
+        if sender.is_null() {
+            return Some(0);
+        }
+        Some(unsafe { browser_port_syphon_client_count(sender) as u64 })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn syphon_player_clients(&self, _player_id: u32) -> Option<u64> {
+        None
+    }
 }
 
 impl Drop for OutputBackend {
@@ -6330,6 +6358,12 @@ impl NdiState {
         unsafe {
             ndi::internal::bindings::NDIlib_send_send_audio_v2(sender.ptr, &mut frame);
         }
+    }
+
+    fn receiver_count(&self, player_id: u32) -> Option<u64> {
+        self.senders
+            .get(&player_id)
+            .map(|sender| if sender.has_receivers { 1 } else { 0 })
     }
 }
 
@@ -7242,6 +7276,12 @@ impl NdiState {
             send_audio_v2(sender.ptr, &frame);
         }
     }
+
+    fn receiver_count(&self, player_id: u32) -> Option<u64> {
+        self.senders
+            .get(&player_id)
+            .map(|sender| if sender.has_receivers { 1 } else { 0 })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -7292,6 +7332,10 @@ impl NdiState {
     }
 
     fn send_audio(&mut self, _player_id: u32, _payload: &[u8]) {}
+
+    fn receiver_count(&self, _player_id: u32) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]

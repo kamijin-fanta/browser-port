@@ -49,6 +49,13 @@ struct PlayerStreamState {
     codec: Option<String>,
     coded_width: Option<u32>,
     coded_height: Option<u32>,
+    fps: Option<f64>,
+    bitrate: Option<f64>,
+    tab_title: Option<String>,
+    ndi_connected: Option<bool>,
+    ndi_receivers: Option<u64>,
+    syphon_connected: Option<bool>,
+    syphon_clients: Option<u64>,
     video_chunks: u64,
     audio_chunks: u64,
     last_timestamp_us: u64,
@@ -168,6 +175,10 @@ impl SharedState {
             self.player_configs.remove(player);
             if let Some(stream) = self.player_streams.get_mut(player) {
                 stream.connected = false;
+                stream.ndi_connected = Some(false);
+                stream.ndi_receivers = Some(0);
+                stream.syphon_connected = Some(false);
+                stream.syphon_clients = Some(0);
             }
         }
         disconnected_players
@@ -234,6 +245,75 @@ impl SharedState {
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok());
         self.player_configs.insert(player_id, message.clone());
+    }
+
+    fn update_stream_status(&mut self, player_id: u32, message: &Value) {
+        let stream = self.player_streams.entry(player_id).or_default();
+        stream.connected = true;
+        let stats = message
+            .get("stats")
+            .filter(|value| value.is_object())
+            .unwrap_or(message);
+
+        if let Some(codec) = stats
+            .get("codec")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            stream.codec = Some(codec.to_string());
+        }
+
+        if let Some(resolution) = stats.get("resolution").and_then(Value::as_object) {
+            stream.coded_width = resolution
+                .get("width")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok());
+            stream.coded_height = resolution
+                .get("height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok());
+        } else {
+            if let Some(width) = stats
+                .get("codedWidth")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                stream.coded_width = Some(width);
+            }
+            if let Some(height) = stats
+                .get("codedHeight")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                stream.coded_height = Some(height);
+            }
+        }
+
+        if let Some(fps) = stats
+            .get("fps")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            stream.fps = Some(fps);
+        }
+
+        if let Some(bitrate) = stats
+            .get("bitrate")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        {
+            stream.bitrate = Some(bitrate);
+        }
+
+        if let Some(tab_title) = stats
+            .get("tabTitle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            stream.tab_title = Some(tab_title.to_string());
+        }
     }
 
     fn player_config_messages(&self) -> Vec<Value> {
@@ -339,6 +419,20 @@ impl SharedState {
         stream.queue_depth = perf.queue_depth;
         stream.frame_mean_luma = perf.frame_mean_luma;
         stream.frame_non_black_ratio = perf.frame_non_black_ratio;
+        if let Some(connected) = perf.ndi_connected {
+            stream.ndi_connected = Some(connected);
+        }
+        if let Some(receivers) = perf.ndi_receivers {
+            stream.ndi_receivers = Some(receivers);
+            stream.ndi_connected = Some(receivers > 0);
+        }
+        if let Some(connected) = perf.syphon_connected {
+            stream.syphon_connected = Some(connected);
+        }
+        if let Some(clients) = perf.syphon_clients {
+            stream.syphon_clients = Some(clients);
+            stream.syphon_connected = Some(clients > 0);
+        }
         stream.last_helper_stats_at = Some(StdInstant::now());
     }
 
@@ -415,6 +509,10 @@ struct HelperPlayerPerf {
     queue_depth: Option<u64>,
     frame_mean_luma: Option<f64>,
     frame_non_black_ratio: Option<f64>,
+    ndi_connected: Option<bool>,
+    ndi_receivers: Option<u64>,
+    syphon_connected: Option<bool>,
+    syphon_clients: Option<u64>,
 }
 
 struct HandshakeInfo {
@@ -1121,6 +1219,9 @@ async fn handle_text_message(
                 if msg_type == "config" {
                     lock.update_stream_config(player_id, &value);
                 }
+                if msg_type == "status" {
+                    lock.update_stream_status(player_id, &value);
+                }
                 if msg_type == "register" {
                     drop(lock);
                     broadcast_status(
@@ -1343,6 +1444,18 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
             .and_then(Value::as_f64)
             .map(|v| if v < 0.0 { 0 } else { v as u64 })
     });
+    let ndi_receivers = value.get("ndiReceivers").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("ndiReceivers")
+            .and_then(Value::as_f64)
+            .map(|v| if v < 0.0 { 0 } else { v as u64 })
+    });
+    let syphon_clients = value.get("syphonClients").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("syphonClients")
+            .and_then(Value::as_f64)
+            .map(|v| if v < 0.0 { 0 } else { v as u64 })
+    });
     Some(HelperPlayerPerf {
         player_id,
         decode_backend: value
@@ -1377,6 +1490,10 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
         queue_depth,
         frame_mean_luma: value.get("frameMeanLuma").and_then(Value::as_f64),
         frame_non_black_ratio: value.get("frameNonBlackRatio").and_then(Value::as_f64),
+        ndi_connected: value.get("ndiConnected").and_then(Value::as_bool),
+        ndi_receivers,
+        syphon_connected: value.get("syphonConnected").and_then(Value::as_bool),
+        syphon_clients,
     })
 }
 
@@ -1566,6 +1683,13 @@ async fn build_browser_port_stats_payload(
                 "codec": stream.codec,
                 "codedWidth": stream.coded_width,
                 "codedHeight": stream.coded_height,
+                "fps": stream.fps,
+                "bitrate": stream.bitrate,
+                "tabTitle": stream.tab_title,
+                "ndiConnected": stream.ndi_connected,
+                "ndiReceivers": stream.ndi_receivers,
+                "syphonConnected": stream.syphon_connected,
+                "syphonClients": stream.syphon_clients,
                 "videoChunks": stream.video_chunks,
                 "audioChunks": stream.audio_chunks,
                 "lastTimestampUs": stream.last_timestamp_us,
