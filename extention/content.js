@@ -1566,13 +1566,23 @@ if (!window.__BrowserPort_listener) {
 
   function reportStatus(status, error) {
     if (currentPlayerId === null) return;
+    const stats = buildStreamStats();
     chrome.runtime.sendMessage({
       type: 'STREAM_STATUS',
       playerId: currentPlayerId,
       status,
       error,
-      stats: buildStreamStats(),
+      stats,
     });
+    if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+      webSocket.send(JSON.stringify({
+        type: 'status',
+        playerId: currentPlayerId,
+        status,
+        error: error || null,
+        stats,
+      }));
+    }
   }
 
   consumePendingSearchRequest();

@@ -3,6 +3,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+#[cfg(target_os = "macos")]
+use std::ffi::{CStr, CString};
+#[cfg(target_os = "windows")]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -48,6 +51,13 @@ struct PlayerStreamState {
     codec: Option<String>,
     coded_width: Option<u32>,
     coded_height: Option<u32>,
+    fps: Option<f64>,
+    bitrate: Option<f64>,
+    tab_title: Option<String>,
+    ndi_connected: Option<bool>,
+    ndi_receivers: Option<u64>,
+    syphon_connected: Option<bool>,
+    syphon_clients: Option<u64>,
     video_chunks: u64,
     audio_chunks: u64,
     last_timestamp_us: u64,
@@ -89,7 +99,7 @@ struct OutputFlags {
 impl Default for OutputFlags {
     fn default() -> Self {
         Self {
-            ndi_enabled: false,
+            ndi_enabled: true,
             spout_enabled: cfg!(target_os = "windows"),
             syphon_enabled: cfg!(target_os = "macos"),
         }
@@ -113,7 +123,6 @@ impl Default for OutputAvailability {
     }
 }
 
-#[derive(Default)]
 struct SharedState {
     connections: HashMap<ConnId, ConnectionHandle>,
     player_routes: HashMap<u32, ConnId>,
@@ -122,6 +131,26 @@ struct SharedState {
     syphon_client_count: usize,
     outputs: OutputFlags,
     output_availability: OutputAvailability,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        let output_availability = OutputAvailability::default();
+        let outputs = OutputFlags {
+            ndi_enabled: output_availability.ndi_available,
+            spout_enabled: output_availability.spout_available,
+            syphon_enabled: output_availability.syphon_available,
+        };
+        Self {
+            connections: HashMap::new(),
+            player_routes: HashMap::new(),
+            player_streams: HashMap::new(),
+            player_configs: HashMap::new(),
+            syphon_client_count: 0,
+            outputs,
+            output_availability,
+        }
+    }
 }
 
 impl SharedState {
@@ -148,6 +177,10 @@ impl SharedState {
             self.player_configs.remove(player);
             if let Some(stream) = self.player_streams.get_mut(player) {
                 stream.connected = false;
+                stream.ndi_connected = Some(false);
+                stream.ndi_receivers = Some(0);
+                stream.syphon_connected = Some(false);
+                stream.syphon_clients = Some(0);
             }
         }
         disconnected_players
@@ -214,6 +247,75 @@ impl SharedState {
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok());
         self.player_configs.insert(player_id, message.clone());
+    }
+
+    fn update_stream_status(&mut self, player_id: u32, message: &Value) {
+        let stream = self.player_streams.entry(player_id).or_default();
+        stream.connected = true;
+        let stats = message
+            .get("stats")
+            .filter(|value| value.is_object())
+            .unwrap_or(message);
+
+        if let Some(codec) = stats
+            .get("codec")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            stream.codec = Some(codec.to_string());
+        }
+
+        if let Some(resolution) = stats.get("resolution").and_then(Value::as_object) {
+            stream.coded_width = resolution
+                .get("width")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok());
+            stream.coded_height = resolution
+                .get("height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok());
+        } else {
+            if let Some(width) = stats
+                .get("codedWidth")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                stream.coded_width = Some(width);
+            }
+            if let Some(height) = stats
+                .get("codedHeight")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                stream.coded_height = Some(height);
+            }
+        }
+
+        if let Some(fps) = stats
+            .get("fps")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            stream.fps = Some(fps);
+        }
+
+        if let Some(bitrate) = stats
+            .get("bitrate")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        {
+            stream.bitrate = Some(bitrate);
+        }
+
+        if let Some(tab_title) = stats
+            .get("tabTitle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            stream.tab_title = Some(tab_title.to_string());
+        }
     }
 
     fn player_config_messages(&self) -> Vec<Value> {
@@ -319,6 +421,20 @@ impl SharedState {
         stream.queue_depth = perf.queue_depth;
         stream.frame_mean_luma = perf.frame_mean_luma;
         stream.frame_non_black_ratio = perf.frame_non_black_ratio;
+        if let Some(connected) = perf.ndi_connected {
+            stream.ndi_connected = Some(connected);
+        }
+        if let Some(receivers) = perf.ndi_receivers {
+            stream.ndi_receivers = Some(receivers);
+            stream.ndi_connected = Some(receivers > 0);
+        }
+        if let Some(connected) = perf.syphon_connected {
+            stream.syphon_connected = Some(connected);
+        }
+        if let Some(clients) = perf.syphon_clients {
+            stream.syphon_clients = Some(clients);
+            stream.syphon_connected = Some(clients > 0);
+        }
         stream.last_helper_stats_at = Some(StdInstant::now());
     }
 
@@ -395,6 +511,10 @@ struct HelperPlayerPerf {
     queue_depth: Option<u64>,
     frame_mean_luma: Option<f64>,
     frame_non_black_ratio: Option<f64>,
+    ndi_connected: Option<bool>,
+    ndi_receivers: Option<u64>,
+    syphon_connected: Option<bool>,
+    syphon_clients: Option<u64>,
 }
 
 struct HandshakeInfo {
@@ -1126,6 +1246,9 @@ async fn handle_text_message(
                 if msg_type == "config" {
                     lock.update_stream_config(player_id, &value);
                 }
+                if msg_type == "status" {
+                    lock.update_stream_status(player_id, &value);
+                }
                 if msg_type == "register" {
                     drop(lock);
                     broadcast_status(
@@ -1348,6 +1471,18 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
             .and_then(Value::as_f64)
             .map(|v| if v < 0.0 { 0 } else { v as u64 })
     });
+    let ndi_receivers = value.get("ndiReceivers").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("ndiReceivers")
+            .and_then(Value::as_f64)
+            .map(|v| if v < 0.0 { 0 } else { v as u64 })
+    });
+    let syphon_clients = value.get("syphonClients").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("syphonClients")
+            .and_then(Value::as_f64)
+            .map(|v| if v < 0.0 { 0 } else { v as u64 })
+    });
     Some(HelperPlayerPerf {
         player_id,
         decode_backend: value
@@ -1382,6 +1517,10 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
         queue_depth,
         frame_mean_luma: value.get("frameMeanLuma").and_then(Value::as_f64),
         frame_non_black_ratio: value.get("frameNonBlackRatio").and_then(Value::as_f64),
+        ndi_connected: value.get("ndiConnected").and_then(Value::as_bool),
+        ndi_receivers,
+        syphon_connected: value.get("syphonConnected").and_then(Value::as_bool),
+        syphon_clients,
     })
 }
 
@@ -1571,6 +1710,13 @@ async fn build_browser_port_stats_payload(
                 "codec": stream.codec,
                 "codedWidth": stream.coded_width,
                 "codedHeight": stream.coded_height,
+                "fps": stream.fps,
+                "bitrate": stream.bitrate,
+                "tabTitle": stream.tab_title,
+                "ndiConnected": stream.ndi_connected,
+                "ndiReceivers": stream.ndi_receivers,
+                "syphonConnected": stream.syphon_connected,
+                "syphonClients": stream.syphon_clients,
                 "videoChunks": stream.video_chunks,
                 "audioChunks": stream.audio_chunks,
                 "lastTimestampUs": stream.last_timestamp_us,
@@ -1684,14 +1830,21 @@ fn detect_ndi_runtime() -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Library/NDI SDK for Apple/lib/macOS/libndi.dylib",
-            "/usr/local/lib/libndi.dylib",
-        ];
-        for candidate in candidates {
-            if Path::new(candidate).exists() {
-                return true;
+        let mut reasons = Vec::new();
+        for candidate in ndi_library_candidates_macos() {
+            match try_load_ndi_runtime_macos(&candidate) {
+                Ok(()) => {
+                    eprintln!("BrowserPort: detected NDI runtime path={candidate}");
+                    return true;
+                }
+                Err(reason) => reasons.push(format!("{candidate}: {reason}")),
             }
+        }
+        if !reasons.is_empty() {
+            eprintln!(
+                "BrowserPort: NDI runtime unavailable on macOS {}",
+                reasons.join(" | ")
+            );
         }
         return false;
     }
@@ -1700,6 +1853,43 @@ fn detect_ndi_runtime() -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ndi_library_candidates_macos() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push("/Library/NDI SDK for Apple/lib/macOS/libndi.dylib".to_string());
+    candidates.push("/usr/local/lib/libndi.dylib".to_string());
+    candidates.push("/opt/homebrew/lib/libndi.dylib".to_string());
+    candidates.push("libndi.dylib".to_string());
+    candidates.push("libndi.6.dylib".to_string());
+    candidates.push("libndi.5.dylib".to_string());
+    candidates.push("libndi.4.dylib".to_string());
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn try_load_ndi_runtime_macos(path: &str) -> Result<(), String> {
+    let c_path = CString::new(path).map_err(|_| "invalid dylib path".to_string())?;
+    unsafe {
+        libc::dlerror();
+        let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if handle.is_null() {
+            let err = libc::dlerror();
+            if err.is_null() {
+                return Err("dlopen failed with null error".to_string());
+            }
+            return Err(CStr::from_ptr(err).to_string_lossy().into_owned());
+        }
+        libc::dlclose(handle);
+    }
+    Ok(())
 }
 
 fn parse_env_bool(raw: &str) -> Option<bool> {

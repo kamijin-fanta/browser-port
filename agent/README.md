@@ -57,6 +57,9 @@ Runtime dependency notes:
 - `syphon` (macOS): uses dynamic Syphon runtime classes via `agent/native/syphon/syphon_bridge.mm`
   (runtime still requires Syphon framework to be installed)
 - `ndi`: uses Rust `ndi` crate and requires NDI Runtime installed on host
+  - On macOS, BrowserPort dynamically loads `libndi` at runtime.
+  - If runtime is missing, NDI output is reported as unavailable and cannot be enabled.
+  - Optional override: `BROWSER_PORT_NDI_LIBRARY_PATH=/absolute/path/to/libndi.dylib`
 
 ### Embed Syphon.framework (macOS)
 
