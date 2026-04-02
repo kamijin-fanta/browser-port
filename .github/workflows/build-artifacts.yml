@@ -1,0 +1,104 @@
+name: Build Artifacts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os_name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os_name: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os_name: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust Build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            agent
+
+      - name: Install WiX Toolset
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: choco install wixtoolset -y --no-progress
+
+      - name: Build Windows Installer + Standalone
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          ./agent/installer/windows/build-msi.ps1 `
+            -Target "${{ matrix.target }}" `
+            -OutputDir "$PWD/agent/target/dist"
+
+      - name: Build Linux Installer + Standalone
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          chmod +x ./agent/installer/linux/build-tar.sh
+          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/linux/build-tar.sh
+
+      - name: Build macOS Installer + Standalone
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: |
+          chmod +x ./agent/installer/macos/build-pkg.sh
+          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/macos/build-pkg.sh
+
+      - name: Package Chrome Extension
+        shell: pwsh
+        run: ./extention/package-extension.ps1 -OutputDir "$PWD/extention/target"
+
+      - name: Assemble Artifact Files
+        shell: pwsh
+        env:
+          ARTIFACT_DIR: ci-artifacts/${{ matrix.os_name }}
+        run: |
+          $artifactDir = Join-Path $PWD $env:ARTIFACT_DIR
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+
+          $distDir = Join-Path $PWD "agent/target/dist"
+          if (!(Test-Path $distDir)) {
+            throw "Distribution directory not found: $distDir"
+          }
+          Get-ChildItem -Path $distDir -File | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $artifactDir -Force
+          }
+
+          $extDir = Join-Path $PWD "extention/target"
+          $extensionZip = Get-ChildItem -Path $extDir -Filter "browser-port-chrome-extension-*.zip" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $extensionZip) {
+            throw "Chrome extension zip was not generated"
+          }
+          Copy-Item -Path $extensionZip.FullName -Destination $artifactDir -Force
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-port-${{ matrix.os_name }}
+          path: ci-artifacts/${{ matrix.os_name }}
+          if-no-files-found: error

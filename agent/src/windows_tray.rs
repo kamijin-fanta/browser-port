@@ -32,6 +32,7 @@ const TRAY_ICON_SIZE: u32 = 16;
 const WM_TRAYICON: u32 = WM_APP + 1;
 const TRAY_ICON_ID: u32 = 1;
 const MENU_ID_QUIT: usize = 1001;
+const PLAYER_COUNT: u32 = 4;
 
 struct TrayContext {
     state: Arc<RwLock<SharedState>>,
@@ -39,6 +40,19 @@ struct TrayContext {
     bind_addr: String,
     stop: Arc<AtomicBool>,
     hicon: HICON,
+}
+
+#[derive(Clone, Default)]
+struct PlayerMenuSnapshot {
+    connected: bool,
+    codec: Option<String>,
+    coded_width: Option<u32>,
+    coded_height: Option<u32>,
+    fps: Option<f64>,
+    bitrate: Option<f64>,
+    tab_title: Option<String>,
+    ndi_connected: Option<bool>,
+    syphon_connected: Option<bool>,
 }
 
 pub fn run_tray_app(
@@ -163,7 +177,9 @@ extern "system" fn tray_wnd_proc(
                 }
             }
             WM_TRAYICON => {
-                let event = lparam.0 as u32;
+                // With NOTIFYICON_VERSION_4, lParam packs additional data; the
+                // low word carries the mouse/window event id we need to match.
+                let event = (lparam.0 as u32) & 0xFFFF;
                 if matches!(event, WM_CONTEXTMENU | WM_RBUTTONUP | WM_LBUTTONUP) {
                     if let Some(ctx) = tray_context_from_hwnd(hwnd) {
                         if let Err(err) = show_tray_menu(hwnd, ctx) {
@@ -188,24 +204,70 @@ extern "system" fn tray_wnd_proc(
 }
 
 unsafe fn show_tray_menu(hwnd: HWND, ctx: &TrayContext) -> anyhow::Result<()> {
-    let (players, syphon_clients, bind_addr) = ctx.handle.block_on(async {
+    let snapshot = ctx.handle.block_on(async {
         let lock = ctx.state.read().await;
+        let mut players = Vec::with_capacity(PLAYER_COUNT as usize);
+        for player_id in 1..=PLAYER_COUNT {
+            let stream = lock.player_streams.get(&player_id);
+            players.push((
+                player_id,
+                PlayerMenuSnapshot {
+                    connected: stream.map(|s| s.connected).unwrap_or(false),
+                    codec: stream.and_then(|s| s.codec.clone()),
+                    coded_width: stream.and_then(|s| s.coded_width),
+                    coded_height: stream.and_then(|s| s.coded_height),
+                    fps: stream.and_then(|s| s.fps),
+                    bitrate: stream.and_then(|s| s.bitrate),
+                    tab_title: stream.and_then(|s| s.tab_title.clone()),
+                    ndi_connected: stream.and_then(|s| s.ndi_connected),
+                    syphon_connected: stream.and_then(|s| s.syphon_connected),
+                },
+            ));
+        }
         (
             lock.player_routes.len(),
-            lock.syphon_client_count,
-            ctx.bind_addr.clone(),
+            format!("ws://{}", ctx.bind_addr),
+            lock.outputs.ndi_enabled,
+            lock.outputs.syphon_enabled,
+            players,
         )
     });
-    let players_title = format!("Players: {players}");
-    let syphon_title = format!("Syphon: {}", format_connection_count(syphon_clients));
-    let ws_title = format!("WS: {bind_addr}");
+    let players_title = format!("Players: {}", snapshot.0);
+    let server_title = format!("Server: {}", snapshot.1);
 
     let menu = CreatePopupMenu().context("CreatePopupMenu failed")?;
     append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &players_title)?;
-    append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &syphon_title)?;
-    append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &ws_title)?;
-    AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator failed")?;
+    append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &server_title)?;
     append_menu_text(menu, MF_STRING, MENU_ID_QUIT, "Quit BrowserPort")?;
+    AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator failed")?;
+
+    for (player_id, player) in &snapshot.4 {
+        if !player.connected {
+            append_menu_text(
+                menu,
+                MF_STRING | MF_GRAYED,
+                0,
+                &format!("Player{player_id} Idle"),
+            )?;
+        } else {
+            let outputs = format_player_outputs(player, snapshot.2, snapshot.3);
+            let header = if outputs.is_empty() {
+                format!("Player{player_id} Connected")
+            } else {
+                format!("Player{player_id} Connected        {outputs}")
+            };
+            let stream_line = format_stream_line(player);
+            let tab_title = player.tab_title.as_deref().unwrap_or("N/A");
+
+            append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &header)?;
+            append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &stream_line)?;
+            append_menu_text(menu, MF_STRING | MF_GRAYED, 0, tab_title)?;
+        }
+
+        if *player_id < PLAYER_COUNT {
+            append_menu_text(menu, MF_STRING | MF_GRAYED, 0, " ")?;
+        }
+    }
 
     let mut point = POINT::default();
     GetCursorPos(&mut point).context("GetCursorPos failed")?;
@@ -314,10 +376,38 @@ fn copy_wide_truncated(buffer: &mut [u16], value: &str) {
     buffer[max] = 0;
 }
 
-fn format_connection_count(count: usize) -> String {
-    if count == 0 {
-        "0".to_string()
-    } else {
-        count.to_string()
+fn format_stream_line(player: &PlayerMenuSnapshot) -> String {
+    let codec = player.codec.as_deref().unwrap_or("N/A");
+    let resolution = match (player.coded_width, player.coded_height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => "N/A".to_string(),
+    };
+    let fps = player
+        .fps
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| format!("{value:.1} fps"))
+        .unwrap_or_else(|| "N/A fps".to_string());
+    let bitrate = player
+        .bitrate
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| format!("{:.2} Mbps", value / 1_000_000.0))
+        .unwrap_or_else(|| "N/A Mbps".to_string());
+    format!("{codec} | {resolution} | {fps} | {bitrate}")
+}
+
+fn format_player_outputs(
+    player: &PlayerMenuSnapshot,
+    ndi_enabled: bool,
+    syphon_enabled: bool,
+) -> String {
+    let ndi_connected = player.ndi_connected.unwrap_or(ndi_enabled);
+    let syphon_connected = player.syphon_connected.unwrap_or(syphon_enabled);
+    let mut outputs = Vec::new();
+    if ndi_connected {
+        outputs.push("NDI");
     }
+    if syphon_connected {
+        outputs.push("Syphon");
+    }
+    outputs.join(" ")
 }

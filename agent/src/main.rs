@@ -22,6 +22,8 @@ mod output_helper;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "windows")]
+mod windows_single_instance;
+#[cfg(target_os = "windows")]
 mod windows_tray;
 
 type ConnId = u64;
@@ -787,9 +789,15 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
     let rt_stop = Arc::clone(&stop);
     let rt_state = Arc::clone(&state);
     let runtime_thread = thread::spawn(move || {
-        if let Err(err) = runtime.block_on(run_browser_port(rt_state, rt_stop)) {
-            eprintln!("browser-port server exited with error: {err}");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(run_browser_port(rt_state, Arc::clone(&rt_stop)))
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => eprintln!("browser-port server exited with error: {err}"),
+            Err(_) => eprintln!("browser-port server thread panicked"),
         }
+        rt_stop.store(true, Ordering::Relaxed);
     });
     let result = macos_menu::run_menu_bar_app(state, bind_addr, stop.clone(), handle);
     stop.store(true, Ordering::Relaxed);
@@ -799,6 +807,13 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn run_menu_bar_app() -> anyhow::Result<()> {
+    let Some(_single_instance_guard) =
+        windows_single_instance::SingleInstanceGuard::acquire("Local\\BrowserPortTrayApp")?
+    else {
+        eprintln!("BrowserPort: another tray instance is already running");
+        return Ok(());
+    };
+
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(RwLock::new(SharedState::default()));
     let bind_addr =
@@ -812,9 +827,15 @@ fn run_menu_bar_app() -> anyhow::Result<()> {
     let rt_stop = Arc::clone(&stop);
     let rt_state = Arc::clone(&state);
     let runtime_thread = thread::spawn(move || {
-        if let Err(err) = runtime.block_on(run_browser_port(rt_state, rt_stop)) {
-            eprintln!("browser-port server exited with error: {err}");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(run_browser_port(rt_state, Arc::clone(&rt_stop)))
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => eprintln!("browser-port server exited with error: {err}"),
+            Err(_) => eprintln!("browser-port server thread panicked"),
         }
+        rt_stop.store(true, Ordering::Relaxed);
     });
     let result = windows_tray::run_tray_app(state, bind_addr, stop.clone(), handle);
     stop.store(true, Ordering::Relaxed);
