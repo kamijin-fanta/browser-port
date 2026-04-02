@@ -1,7 +1,32 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    configure_windows_common_controls_manifest();
     build_windows_spout();
     build_macos_syphon();
+}
+
+fn configure_windows_common_controls_manifest() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+
+    let manifest_rel = std::path::PathBuf::from("assets").join("windows-common-controls.manifest");
+    println!("cargo:rerun-if-changed={}", manifest_rel.display());
+
+    let manifest_path = std::env::current_dir()
+        .map(|cwd| cwd.join(&manifest_rel))
+        .unwrap_or(manifest_rel);
+
+    // Some linked native components import newer comctl32 exports by ordinal.
+    // Embedding the Common Controls v6 manifest ensures the correct side-by-side DLL is loaded.
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
 }
 
 fn build_windows_spout() {
