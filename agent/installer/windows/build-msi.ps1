@@ -49,7 +49,7 @@ Example (admin shell): choco install wixtoolset -y
     $wxsFiles = @(Get-ChildItem -Path $wixDir -Filter "*.wxs" -File -ErrorAction SilentlyContinue)
     if ($wxsFiles.Count -eq 0) {
         Write-Host "[BrowserPort] Initializing WiX sources"
-        cargo wix init --nocapture
+        cargo wix init
 
         $wxsFiles = @(Get-ChildItem -Path $wixDir -Filter "*.wxs" -File -ErrorAction SilentlyContinue)
         if ($wxsFiles.Count -eq 0) {
