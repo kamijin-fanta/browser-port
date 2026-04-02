@@ -6392,6 +6392,8 @@ const NDI_FRAME_FORMAT_PROGRESSIVE: i32 = 1;
 const NDI_STAGING_RING_SIZE: usize = 3;
 #[cfg(target_os = "macos")]
 const NDI_PATH_LOG_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const NDI_SENDER_CLOCK_ENV: &str = "BROWSER_PORT_NDI_SENDER_CLOCK";
 
 #[cfg(target_os = "macos")]
 const fn ndi_fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
@@ -6402,6 +6404,15 @@ const fn ndi_fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
 const NDI_FOURCC_NV12: u32 = ndi_fourcc(b'N', b'V', b'1', b'2');
 #[cfg(target_os = "macos")]
 const NDI_FOURCC_BGRA: u32 = ndi_fourcc(b'B', b'G', b'R', b'A');
+
+#[cfg(target_os = "macos")]
+fn ndi_sender_clock_enabled() -> bool {
+    std::env::var(NDI_SENDER_CLOCK_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
+}
 
 #[cfg(target_os = "macos")]
 type NdiSendInstanceT = *mut std::ffi::c_void;
@@ -6537,6 +6548,7 @@ struct NdiMacSender {
     last_receiver_check_at: Option<Instant>,
     has_receivers: bool,
     last_no_receiver_log_at: Option<Instant>,
+    audio_planar: Vec<f32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -6560,6 +6572,7 @@ impl NdiMacSender {
             last_receiver_check_at: None,
             has_receivers: true,
             last_no_receiver_log_at: None,
+            audio_planar: Vec::new(),
         }
     }
 
@@ -7125,11 +7138,12 @@ impl NdiState {
         }
         if !self.senders.contains_key(&player_id) {
             let name = CString::new(format!("browser-port-ndi-{player_id}")).ok()?;
+            let clock_enabled = ndi_sender_clock_enabled();
             let settings = NdiSendCreateT {
                 p_ndi_name: name.as_ptr(),
                 p_groups: ptr::null(),
-                clock_video: true,
-                clock_audio: true,
+                clock_video: clock_enabled,
+                clock_audio: clock_enabled,
             };
             let sender_ptr = unsafe {
                 let api = self.api.as_ref()?;
@@ -7139,7 +7153,10 @@ impl NdiState {
                 eprintln!("output-helper: ndi sender create failed player={player_id}");
                 return None;
             }
-            eprintln!("output-helper: ndi sender created player={player_id}");
+            eprintln!(
+                "output-helper: ndi sender created player={} clocking={}",
+                player_id, clock_enabled
+            );
             self.senders
                 .insert(player_id, NdiMacSender::new(sender_ptr, name));
         }
@@ -7249,17 +7266,27 @@ impl NdiState {
             return;
         };
         let interleaved_bytes = &payload[8..8 + expected_bytes];
-        let mut planar = vec![0_f32; frame_count * channels];
-        for i in 0..frame_count {
-            for ch in 0..channels {
-                let src_index = (i * channels + ch) * 4;
-                let sample = f32::from_le_bytes([
-                    interleaved_bytes[src_index],
-                    interleaved_bytes[src_index + 1],
-                    interleaved_bytes[src_index + 2],
-                    interleaved_bytes[src_index + 3],
-                ]);
-                planar[ch * frame_count + i] = sample;
+        let samples = frame_count.saturating_mul(channels);
+        if sender.audio_planar.len() != samples {
+            sender.audio_planar.resize(samples, 0.0);
+        }
+        if channels == 1 {
+            for (idx, chunk) in interleaved_bytes.chunks_exact(4).enumerate() {
+                sender.audio_planar[idx] =
+                    f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        } else {
+            for i in 0..frame_count {
+                for ch in 0..channels {
+                    let src_index = (i * channels + ch) * 4;
+                    let sample = f32::from_le_bytes([
+                        interleaved_bytes[src_index],
+                        interleaved_bytes[src_index + 1],
+                        interleaved_bytes[src_index + 2],
+                        interleaved_bytes[src_index + 3],
+                    ]);
+                    sender.audio_planar[ch * frame_count + i] = sample;
+                }
             }
         }
         let frame = NdiAudioFrameV2T {
@@ -7267,7 +7294,7 @@ impl NdiState {
             no_channels: channels as i32,
             no_samples: frame_count as i32,
             timecode: NDI_TIMECODE_SYNTHESIZE,
-            p_data: planar.as_mut_ptr(),
+            p_data: sender.audio_planar.as_mut_ptr(),
             channel_stride_in_bytes: (frame_count * 4) as i32,
             p_metadata: ptr::null(),
             timestamp: NDI_TIMESTAMP_UNDEFINED,
