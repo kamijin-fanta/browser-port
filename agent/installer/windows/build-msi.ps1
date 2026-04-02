@@ -45,6 +45,18 @@ Example (admin shell): choco install wixtoolset -y
 "@
     }
 
+    $wixDir = Join-Path $AgentDir "wix"
+    $wxsFiles = @(Get-ChildItem -Path $wixDir -Filter "*.wxs" -File -ErrorAction SilentlyContinue)
+    if ($wxsFiles.Count -eq 0) {
+        Write-Host "[BrowserPort] Initializing WiX sources"
+        cargo wix init --nocapture
+
+        $wxsFiles = @(Get-ChildItem -Path $wixDir -Filter "*.wxs" -File -ErrorAction SilentlyContinue)
+        if ($wxsFiles.Count -eq 0) {
+            throw "WiX source files were not generated under wix\\"
+        }
+    }
+
     Write-Host "[BrowserPort] Building MSI (unsigned)"
     cargo wix --target $Target --nocapture
 
