@@ -25,6 +25,7 @@ STANDALONE_PATH="$OUTPUT_DIR/browser-port-$VERSION-$TARGET_TRIPLE"
 BUILD_BIN="$AGENT_DIR/target/$TARGET_TRIPLE/release/browser-port"
 SYPHON_FRAMEWORK_SOURCE="$AGENT_DIR/target/release/Frameworks/Syphon.framework"
 EXTENSION_ICON_SOURCE="$REPO_DIR/extention/icons/icon128.png"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 ICONSET_DIR="$(mktemp -d "$AGENT_DIR/target/browser-port-iconset.XXXXXX.iconset")"
 STAGING_DIR="$(mktemp -d "$AGENT_DIR/target/browser-port-dmg.XXXXXX")"
 
@@ -58,6 +59,10 @@ if ! command -v sips >/dev/null 2>&1; then
 fi
 if ! command -v iconutil >/dev/null 2>&1; then
   echo "iconutil is required to generate the macOS app icon" >&2
+  exit 1
+fi
+if ! command -v codesign >/dev/null 2>&1; then
+  echo "codesign is required to create a valid macOS app bundle signature" >&2
   exit 1
 fi
 
@@ -121,6 +126,17 @@ cat > "$APP_INFO_PLIST" <<EOF
 </dict>
 </plist>
 EOF
+
+# Re-sign the bundle after assembling all resources and embedded frameworks.
+# Without this, rustc's linker-signed executable can cause Gatekeeper to treat
+# the app bundle as damaged when downloaded from CI artifacts.
+xattr -cr "$APP_BUNDLE"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  codesign --force --deep --sign - "$APP_BUNDLE"
+else
+  codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/$APP_BUNDLE_NAME"
