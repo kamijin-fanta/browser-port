@@ -99,7 +99,6 @@ Unified entrypoint:
 ## Installer scaffolding
 
 - Windows MSI script: `installer/windows/build-msi.ps1`
-- macOS PKG script: `installer/macos/build-pkg.sh`
 - macOS DMG script: `installer/macos/build-dmg.sh`
 
 These scripts are unsigned defaults for local/internal distribution.
