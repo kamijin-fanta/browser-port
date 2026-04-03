@@ -1,6 +1,7 @@
 # Rust
 target/
 tmp/
+.tmp/
 
 # Python
 **/__pycache__/

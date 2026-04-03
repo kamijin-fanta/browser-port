@@ -1,8 +1,31 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    configure_windows_executable_icon();
     configure_windows_common_controls_manifest();
+    configure_windows_ndi_delay_load();
     build_windows_spout();
     build_macos_syphon();
+}
+
+fn configure_windows_executable_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    let icon_rel = std::path::PathBuf::from("assets").join("browser-port.ico");
+    println!("cargo:rerun-if-changed={}", icon_rel.display());
+
+    #[cfg(windows)]
+    {
+        let icon_path = std::env::current_dir()
+            .map(|cwd| cwd.join(&icon_rel))
+            .unwrap_or(icon_rel);
+        let mut res = winres::WindowsResource::new();
+        res.set_icon(icon_path.to_string_lossy().as_ref());
+        if let Err(err) = res.compile() {
+            panic!("failed to embed Windows icon resource: {err}");
+        }
+    }
 }
 
 fn configure_windows_common_controls_manifest() {
@@ -27,6 +50,19 @@ fn configure_windows_common_controls_manifest() {
         "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
         manifest_path.display()
     );
+}
+
+fn configure_windows_ndi_delay_load() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+
+    // Allow browser-port.exe to start even when the NDI runtime DLL is absent.
+    println!("cargo:rustc-link-lib=delayimp");
+    println!("cargo:rustc-link-arg=/DELAYLOAD:Processing.NDI.Lib.x64.dll");
 }
 
 fn build_windows_spout() {

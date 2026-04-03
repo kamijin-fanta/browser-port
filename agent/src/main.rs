@@ -1492,18 +1492,30 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
             .and_then(Value::as_f64)
             .map(|v| if v < 0.0 { 0 } else { v as u64 })
     });
-    let ndi_receivers = value.get("ndiReceivers").and_then(Value::as_u64).or_else(|| {
-        value
-            .get("ndiReceivers")
-            .and_then(Value::as_f64)
-            .map(|v| if v < 0.0 { 0 } else { v as u64 })
-    });
-    let syphon_clients = value.get("syphonClients").and_then(Value::as_u64).or_else(|| {
-        value
-            .get("syphonClients")
-            .and_then(Value::as_f64)
-            .map(|v| if v < 0.0 { 0 } else { v as u64 })
-    });
+    let ndi_receivers = value
+        .get("ndiReceivers")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value.get("ndiReceivers").and_then(Value::as_f64).map(|v| {
+                if v < 0.0 {
+                    0
+                } else {
+                    v as u64
+                }
+            })
+        });
+    let syphon_clients = value
+        .get("syphonClients")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value.get("syphonClients").and_then(Value::as_f64).map(|v| {
+                if v < 0.0 {
+                    0
+                } else {
+                    v as u64
+                }
+            })
+        });
     Some(HelperPlayerPerf {
         player_id,
         decode_backend: value
@@ -1837,12 +1849,8 @@ fn detect_ndi_runtime() -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        let candidates = [
-            r"C:\Program Files\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll",
-            r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll",
-        ];
-        for candidate in candidates {
-            if Path::new(candidate).exists() {
+        for candidate in ndi_library_candidates_windows() {
+            if Path::new(&candidate).exists() {
                 return true;
             }
         }
@@ -1874,6 +1882,33 @@ fn detect_ndi_runtime() -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "windows")]
+fn ndi_library_candidates_windows() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push(r"C:\Program Files\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Remote\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll".to_string());
+    if let Some(path_value) = env::var_os("PATH") {
+        for path_entry in env::split_paths(&path_value) {
+            let candidate = path_entry.join("Processing.NDI.Lib.x64.dll");
+            candidates.push(candidate.to_string_lossy().into_owned());
+        }
+    }
+    candidates
 }
 
 #[cfg(target_os = "macos")]

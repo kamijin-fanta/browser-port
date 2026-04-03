@@ -1,0 +1,102 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='browser-port'
+        UpgradeCode='BCA4355A-617A-4799-AD4D-E55D82F98DCB'
+        Manufacturer='browser-port contributors'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package
+            Id='*'
+            Keywords='Installer'
+            Manufacturer='browser-port contributors'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='browser-port Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='browser-port'/>
+            </Directory>
+            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='browser-port'>
+                    <Component Id='binary0' Guid='*'>
+                        <File
+                            Id='exe0'
+                            Name='browser-port.exe'
+                            DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\browser-port.exe'
+                            KeyPath='yes'/>
+                    </Component>
+                    <Component Id='StartMenuShortcutComponent' Guid='*'>
+                        <Shortcut
+                            Id='ApplicationStartMenuShortcut'
+                            Name='browser-port'
+                            Description='Launch browser-port'
+                            Directory='ApplicationProgramsFolder'
+                            Target='[APPLICATIONFOLDER]browser-port.exe'
+                            WorkingDirectory='APPLICATIONFOLDER'/>
+                        <RemoveFolder
+                            Id='ApplicationProgramsFolderRemove'
+                            Directory='ApplicationProgramsFolder'
+                            On='uninstall'/>
+                        <RegistryValue
+                            Root='HKCU'
+                            Key='Software\browser-port'
+                            Name='StartMenuShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs browser-port executable.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+
+            <Feature
+                Id='StartMenuShortcut'
+                Title='Start Menu Shortcut'
+                Description='Create a Start Menu shortcut for browser-port.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='StartMenuShortcutComponent'/>
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
+            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+        </UI>
+    </Product>
+</Wix>
