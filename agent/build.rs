@@ -130,6 +130,7 @@ fn build_macos_syphon() {
     for framework in [
         "Foundation",
         "AppKit",
+        "ServiceManagement",
         "QuartzCore",
         "CoreMedia",
         "Metal",

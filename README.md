@@ -34,7 +34,7 @@ Each artifact includes:
 
 #### macOS
 
-- Installer: `browser-port-<version>-aarch64-apple-darwin-unsigned.pkg`
+- Installer: `browser-port-<version>-aarch64-apple-darwin-unsigned.dmg`
 - Standalone: `browser-port-<version>-aarch64-apple-darwin`
 
 #### Linux
@@ -74,7 +74,7 @@ Default bind address:
 - Git submodules
 - Platform dependencies:
   - Windows MSI build: WiX Toolset v3 (`candle.exe`, `light.exe`)
-  - macOS installer build: `pkgbuild`
+  - macOS installer build: `hdiutil`, `sips`, `iconutil`
 
 ### Clone
 
@@ -118,11 +118,11 @@ cd agent
 .\installer\windows\build-msi.ps1 -Target x86_64-pc-windows-msvc -OutputDir "$PWD\target\dist"
 ```
 
-### macOS (PKG + standalone)
+### macOS (DMG + standalone)
 
 ```bash
 cd agent
-OUTPUT_DIR="$PWD/target/dist" TARGET_TRIPLE="$(rustc -vV | awk '/host:/ {print $2}')" ./installer/macos/build-pkg.sh
+OUTPUT_DIR="$PWD/target/dist" TARGET_TRIPLE="$(rustc -vV | awk '/host:/ {print $2}')" ./installer/macos/build-dmg.sh
 ```
 
 ### Linux (installer tar + standalone)
@@ -167,6 +167,7 @@ Per job outputs uploaded as an artifact:
 
 - Windows launches as tray app by default.
 - macOS launches as menu-bar app by default.
+- macOS bundled app registers itself as a login item via `SMAppService` on launch.
 - Set `BROWSER_PORT_HEADLESS=true` to disable tray/menu-bar startup mode.
 - Set `BROWSER_PORT_TRAY=true` to force tray/menu-bar mode when supported.
 

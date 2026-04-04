@@ -24,6 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 mod output_helper;
 
 #[cfg(target_os = "macos")]
+mod macos_login_item;
+#[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "windows")]
 mod windows_single_instance;
@@ -798,6 +800,12 @@ fn run_headless_browser_port() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn run_menu_bar_app() -> anyhow::Result<()> {
+    if let Err(err) = macos_login_item::register_main_app_login_item() {
+        eprintln!("BrowserPort: failed to register login item via SMAppService: {err}");
+    } else {
+        eprintln!("BrowserPort: login item registration is enabled");
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(RwLock::new(SharedState::default()));
     let bind_addr =

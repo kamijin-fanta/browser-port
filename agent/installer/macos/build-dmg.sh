@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 REPO_DIR="$(cd "$AGENT_DIR/.." && pwd)"
 
-TARGET_TRIPLE="${TARGET_TRIPLE:-aarch64-apple-darwin}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-$(rustc -vV | awk '/host:/ {print $2}')}"
 APP_NAME="${APP_NAME:-BrowserPort}"
 APP_BUNDLE_NAME="${APP_BUNDLE_NAME:-BrowserPort.app}"
 APP_BUNDLE="$AGENT_DIR/target/${APP_BUNDLE_NAME}"
@@ -15,13 +15,17 @@ APP_FRAMEWORKS="$APP_BUNDLE/Contents/Frameworks"
 APP_INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 APP_ICON_FILE="BrowserPort.icns"
 APP_ICON_OUTPUT="$AGENT_DIR/target/$APP_ICON_FILE"
-APP_VERSION="${APP_VERSION:-0.1.0}"
+VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$AGENT_DIR/Cargo.toml" | head -n1)}"
+APP_VERSION="${APP_VERSION:-$VERSION}"
 APP_IDENTIFIER="${APP_IDENTIFIER:-io.browserport.browser-port}"
-DMG_NAME="${DMG_NAME:-browser-port-${APP_VERSION}.dmg}"
-DMG_PATH="$AGENT_DIR/target/$DMG_NAME"
+OUTPUT_DIR="${OUTPUT_DIR:-$AGENT_DIR/target/dist}"
+DMG_NAME="${DMG_NAME:-browser-port-${VERSION}-${TARGET_TRIPLE}-unsigned.dmg}"
+DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+STANDALONE_PATH="$OUTPUT_DIR/browser-port-$VERSION-$TARGET_TRIPLE"
 BUILD_BIN="$AGENT_DIR/target/$TARGET_TRIPLE/release/browser-port"
-SYMPHON_FRAMEWORK_SOURCE="$AGENT_DIR/target/release/Frameworks/Syphon.framework"
+SYPHON_FRAMEWORK_SOURCE="$AGENT_DIR/target/release/Frameworks/Syphon.framework"
 EXTENSION_ICON_SOURCE="$REPO_DIR/extention/icons/icon128.png"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 ICONSET_DIR="$(mktemp -d "$AGENT_DIR/target/browser-port-iconset.XXXXXX.iconset")"
 STAGING_DIR="$(mktemp -d "$AGENT_DIR/target/browser-port-dmg.XXXXXX")"
 
@@ -33,15 +37,15 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$AGENT_DIR"
-cargo build --release --target "$TARGET_TRIPLE"
+cargo build --release --bin browser-port --target "$TARGET_TRIPLE"
 "$AGENT_DIR/scripts/embed_syphon_framework.sh"
 
 if [[ ! -x "$BUILD_BIN" ]]; then
   echo "Built binary not found: $BUILD_BIN" >&2
   exit 1
 fi
-if [[ ! -d "$SYMPHON_FRAMEWORK_SOURCE" ]]; then
-  echo "Syphon framework not found: $SYMPHON_FRAMEWORK_SOURCE" >&2
+if [[ ! -d "$SYPHON_FRAMEWORK_SOURCE" ]]; then
+  echo "Syphon framework not found: $SYPHON_FRAMEWORK_SOURCE" >&2
   exit 1
 fi
 if [[ ! -f "$EXTENSION_ICON_SOURCE" ]]; then
@@ -55,6 +59,10 @@ if ! command -v sips >/dev/null 2>&1; then
 fi
 if ! command -v iconutil >/dev/null 2>&1; then
   echo "iconutil is required to generate the macOS app icon" >&2
+  exit 1
+fi
+if ! command -v codesign >/dev/null 2>&1; then
+  echo "codesign is required to create a valid macOS app bundle signature" >&2
   exit 1
 fi
 
@@ -83,7 +91,7 @@ iconutil -c icns "$ICONSET_DIR" -o "$APP_ICON_OUTPUT"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_FRAMEWORKS" "$APP_BUNDLE/Contents/MacOS" "$APP_RESOURCES"
 cp "$BUILD_BIN" "$APP_EXECUTABLE"
-cp -R "$SYMPHON_FRAMEWORK_SOURCE" "$APP_FRAMEWORKS/Syphon.framework"
+cp -R "$SYPHON_FRAMEWORK_SOURCE" "$APP_FRAMEWORKS/Syphon.framework"
 cp "$APP_ICON_OUTPUT" "$APP_RESOURCES/$APP_ICON_FILE"
 
 cat > "$APP_INFO_PLIST" <<EOF
@@ -119,9 +127,21 @@ cat > "$APP_INFO_PLIST" <<EOF
 </plist>
 EOF
 
+# Re-sign the bundle after assembling all resources and embedded frameworks.
+# Without this, rustc's linker-signed executable can cause Gatekeeper to treat
+# the app bundle as damaged when downloaded from CI artifacts.
+xattr -cr "$APP_BUNDLE"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  codesign --force --deep --sign - "$APP_BUNDLE"
+else
+  codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/$APP_BUNDLE_NAME"
 ln -s /Applications "$STAGING_DIR/Applications"
+mkdir -p "$OUTPUT_DIR"
 rm -f "$DMG_PATH"
 hdiutil create \
   -volname "$APP_NAME" \
@@ -130,4 +150,8 @@ hdiutil create \
   -format UDZO \
   "$DMG_PATH"
 
+cp "$BUILD_BIN" "$STANDALONE_PATH"
+chmod +x "$STANDALONE_PATH"
+
 echo "Created dmg: $DMG_PATH"
+echo "Created standalone binary: $STANDALONE_PATH"

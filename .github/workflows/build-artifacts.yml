@@ -64,8 +64,8 @@ jobs:
         if: matrix.os_name == 'macos'
         shell: bash
         run: |
-          chmod +x ./agent/installer/macos/build-pkg.sh
-          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/macos/build-pkg.sh
+          chmod +x ./agent/installer/macos/build-dmg.sh
+          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/macos/build-dmg.sh
 
       - name: Package Chrome Extension
         shell: pwsh
