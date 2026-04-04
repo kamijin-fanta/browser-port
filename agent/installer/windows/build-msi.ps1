@@ -37,6 +37,9 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 if ($ManifestVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
     throw "ManifestVersion must be numeric semver-ish (for example: 0.1.0): $ManifestVersion"
 }
+if ([string]::IsNullOrWhiteSpace($env:BROWSER_PORT_APP_VERSION)) {
+    $env:BROWSER_PORT_APP_VERSION = $Version
+}
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 $cargoTomlBackupPath = $null

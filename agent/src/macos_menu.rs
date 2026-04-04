@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use crate::SharedState;
+use crate::{app_version, SharedState};
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSVariableStatusItemLength,
 };
@@ -49,6 +49,7 @@ struct TrayState {
     _status_item: id,
     players_item: id,
     server_item: id,
+    version_item: id,
     player_items: Vec<PlayerMenuItems>,
 }
 
@@ -87,8 +88,10 @@ impl TrayState {
 
         let player_title = ns_string(&format!("Players: {}", snapshot.0));
         let server_title = ns_string(&format!("Server: {}", snapshot.1));
+        let version_title = ns_string(&format!("Version: v{}", app_version()));
         let _: () = msg_send![self.players_item, setTitle: player_title];
         let _: () = msg_send![self.server_item, setTitle: server_title];
+        let _: () = msg_send![self.version_item, setTitle: version_title];
 
         for (index, (player_id, player)) in snapshot.4.iter().enumerate() {
             let Some(items) = self.player_items.get(index) else {
@@ -257,12 +260,14 @@ unsafe fn load_tray_icon() -> id {
     image
 }
 
-unsafe fn build_menu(controller: id) -> (id, id, id, id, Vec<PlayerMenuItems>) {
+unsafe fn build_menu(controller: id) -> (id, id, id, id, id, Vec<PlayerMenuItems>) {
     let menu: id = msg_send![class!(NSMenu), new];
     let status_item: id = msg_send![class!(NSStatusBar), systemStatusBar];
     let status_item: id = msg_send![status_item, statusItemWithLength: NSVariableStatusItemLength];
     let button: id = msg_send![status_item, button];
     if button != nil {
+        let tooltip = ns_string(&format!("BrowserPort v{}", app_version()));
+        let _: () = msg_send![button, setToolTip: tooltip];
         let icon = load_tray_icon();
         if icon != nil {
             let _: () = msg_send![button, setImage: icon];
@@ -277,11 +282,13 @@ unsafe fn build_menu(controller: id) -> (id, id, id, id, Vec<PlayerMenuItems>) {
 
     let players_item = make_menu_item("Players: 0", false, nil, sel!(refreshMenu:));
     let server_item = make_menu_item("Server: ws://127.0.0.1:1844", false, nil, sel!(refreshMenu:));
+    let version_item = make_menu_item(&format!("Version: v{}", app_version()), false, nil, sel!(refreshMenu:));
     let quit_item = make_menu_item("Quit BrowserPort", true, controller, sel!(quit:));
     let separator: id = msg_send![class!(NSMenuItem), separatorItem];
 
     let _: () = msg_send![menu, addItem: players_item];
     let _: () = msg_send![menu, addItem: server_item];
+    let _: () = msg_send![menu, addItem: version_item];
     let _: () = msg_send![menu, addItem: quit_item];
     let _: () = msg_send![menu, addItem: separator];
 
@@ -315,7 +322,7 @@ unsafe fn build_menu(controller: id) -> (id, id, id, id, Vec<PlayerMenuItems>) {
 
     let _: () = msg_send![status_item, setMenu: menu];
     let _: () = msg_send![status_item, setHighlightMode: YES];
-    (menu, status_item, players_item, server_item, player_items)
+    (menu, status_item, players_item, server_item, version_item, player_items)
 }
 
 pub fn run_menu_bar_app(
@@ -335,7 +342,8 @@ pub fn run_menu_bar_app(
 
         let controller_class = menu_controller_class();
         let controller: id = msg_send![controller_class, new];
-        let (_menu, status_item, players_item, server_item, player_items) = build_menu(controller);
+        let (_menu, status_item, players_item, server_item, version_item, player_items) =
+            build_menu(controller);
         eprintln!("BrowserPort: status item created");
 
         let tray_state = Box::new(TrayState {
@@ -346,6 +354,7 @@ pub fn run_menu_bar_app(
             _status_item: status_item,
             players_item,
             server_item,
+            version_item,
             player_items,
         });
         let tray_state_ptr = Box::into_raw(tray_state) as *mut c_void;

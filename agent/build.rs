@@ -1,10 +1,21 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    configure_app_version();
     configure_windows_executable_icon();
     configure_windows_common_controls_manifest();
     configure_windows_ndi_delay_load();
     build_windows_spout();
     build_macos_syphon();
+}
+
+fn configure_app_version() {
+    println!("cargo:rerun-if-env-changed=BROWSER_PORT_APP_VERSION");
+    let app_version = std::env::var("BROWSER_PORT_APP_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("CARGO_PKG_VERSION").ok())
+        .unwrap_or_else(|| "0.0.0".to_string());
+    println!("cargo:rustc-env=BROWSER_PORT_APP_VERSION={app_version}");
 }
 
 fn configure_windows_executable_icon() {

@@ -41,6 +41,10 @@ const SPOUT_HELPER_STALL_GRACE_CHUNKS: u64 = 60;
 const SPOUT_HELPER_STALL_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const SPOUT_FASTPATH_RETRY_COOLDOWN: StdDuration = StdDuration::from_secs(20);
 
+pub(crate) fn app_version() -> &'static str {
+    option_env!("BROWSER_PORT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     BrowserPortExtension,

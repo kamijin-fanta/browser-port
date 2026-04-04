@@ -1,4 +1,4 @@
-use crate::SharedState;
+use crate::{app_version, SharedState};
 use anyhow::{anyhow, Context};
 use image::imageops::FilterType;
 use std::ffi::c_void;
@@ -234,10 +234,12 @@ unsafe fn show_tray_menu(hwnd: HWND, ctx: &TrayContext) -> anyhow::Result<()> {
     });
     let players_title = format!("Players: {}", snapshot.0);
     let server_title = format!("Server: {}", snapshot.1);
+    let version_title = format!("Version: v{}", app_version());
 
     let menu = CreatePopupMenu().context("CreatePopupMenu failed")?;
     append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &players_title)?;
     append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &server_title)?;
+    append_menu_text(menu, MF_STRING | MF_GRAYED, 0, &version_title)?;
     append_menu_text(menu, MF_STRING, MENU_ID_QUIT, "Quit BrowserPort")?;
     AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator failed")?;
 
@@ -302,7 +304,8 @@ unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) -> anyhow::Result<()> {
         hIcon: hicon,
         ..Default::default()
     };
-    copy_wide_truncated(&mut notify_data.szTip, "BrowserPort");
+    let tooltip = format!("BrowserPort v{}", app_version());
+    copy_wide_truncated(&mut notify_data.szTip, &tooltip);
     if !Shell_NotifyIconW(NIM_ADD, &notify_data).as_bool() {
         return Err(anyhow!(
             "Shell_NotifyIconW(NIM_ADD) failed: {}",

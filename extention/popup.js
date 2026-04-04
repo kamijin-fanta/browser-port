@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
 const browserPortStatusEl = document.getElementById('browser-port-status');
 const browserPortDotEl = document.getElementById('browser-port-dot');
 const browserPortTextEl = document.getElementById('browser-port-text');
+const extensionVersionEl = document.getElementById('extension-version');
 const deckListEl = document.getElementById('players');
 const openSettingsEl = document.getElementById('open-settings');
 const closeSettingsEl = document.getElementById('close-settings');
@@ -44,6 +45,7 @@ const deckCards = new Map();
 (async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTab = tab;
+  updateExtensionVersion();
 
   settingsFormEl.addEventListener('submit', onSettingsSubmit);
   settingsFormEl.addEventListener('input', () => {
@@ -66,6 +68,13 @@ const deckCards = new Map();
   await refreshState();
   pollTimer = setInterval(refreshState, 1000);
 })();
+
+function updateExtensionVersion() {
+  if (!extensionVersionEl) return;
+  const manifest = chrome.runtime.getManifest();
+  const version = manifest.version_name || manifest.version || 'N/A';
+  extensionVersionEl.textContent = `Extension v${version}`;
+}
 
 function normalizeSettings(input) {
   const source = input && typeof input === 'object' ? input : {};

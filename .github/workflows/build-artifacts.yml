@@ -93,6 +93,7 @@ jobs:
           TARGET_TRIPLE="${{ matrix.target }}" \
           VERSION="$FULL_VERSION" \
           MANIFEST_VERSION="$RELEASE_VERSION" \
+          BROWSER_PORT_APP_VERSION="$FULL_VERSION" \
           ./agent/installer/linux/build-tar.sh
 
       - name: Build macOS Installer + Standalone
@@ -105,6 +106,7 @@ jobs:
           VERSION="$FULL_VERSION" \
           MANIFEST_VERSION="$RELEASE_VERSION" \
           APP_VERSION="$RELEASE_VERSION" \
+          BROWSER_PORT_APP_VERSION="$FULL_VERSION" \
           ./agent/installer/macos/build-dmg.sh
 
       - name: Package Chrome Extension

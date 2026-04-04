@@ -38,6 +38,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$AGENT_DIR"
+export BROWSER_PORT_APP_VERSION="${BROWSER_PORT_APP_VERSION:-$VERSION}"
 cargo build --release --bin browser-port --target "$TARGET_TRIPLE"
 "$AGENT_DIR/scripts/embed_syphon_framework.sh"
 

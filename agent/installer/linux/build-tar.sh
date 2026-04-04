@@ -14,6 +14,7 @@ INSTALLER_PATH="$OUTPUT_DIR/browser-port-$VERSION-$TARGET_TRIPLE-linux-installer
 STANDALONE_PATH="$OUTPUT_DIR/browser-port-$VERSION-$TARGET_TRIPLE"
 
 cd "$AGENT_DIR"
+export BROWSER_PORT_APP_VERSION="${BROWSER_PORT_APP_VERSION:-$VERSION}"
 cargo build --release --bin browser-port --target "$TARGET_TRIPLE"
 
 rm -rf "$STAGING_DIR"
