@@ -16,6 +16,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
 mod output_helper;
 
@@ -723,6 +727,9 @@ impl Drop for OutputProcessManager {
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    maybe_hide_console_window_for_direct_launch();
+
     if let Some(helper_args) = output_helper::parse_from_env()? {
         let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
         return rt.block_on(output_helper::run(helper_args));
@@ -733,6 +740,21 @@ fn main() -> anyhow::Result<()> {
     }
 
     run_headless_browser_port()
+}
+
+#[cfg(target_os = "windows")]
+fn maybe_hide_console_window_for_direct_launch() {
+    let mut process_ids = [0_u32; 8];
+    let process_count = unsafe { GetConsoleProcessList(&mut process_ids) };
+    // When launched from cmd/powershell, multiple processes share the same console.
+    if process_count <= 1 {
+        let hwnd = unsafe { GetConsoleWindow() };
+        if !hwnd.0.is_null() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
 }
 
 fn should_launch_menu_bar_app() -> bool {
@@ -1492,18 +1514,30 @@ fn parse_helper_player_perf(value: &Value) -> Option<HelperPlayerPerf> {
             .and_then(Value::as_f64)
             .map(|v| if v < 0.0 { 0 } else { v as u64 })
     });
-    let ndi_receivers = value.get("ndiReceivers").and_then(Value::as_u64).or_else(|| {
-        value
-            .get("ndiReceivers")
-            .and_then(Value::as_f64)
-            .map(|v| if v < 0.0 { 0 } else { v as u64 })
-    });
-    let syphon_clients = value.get("syphonClients").and_then(Value::as_u64).or_else(|| {
-        value
-            .get("syphonClients")
-            .and_then(Value::as_f64)
-            .map(|v| if v < 0.0 { 0 } else { v as u64 })
-    });
+    let ndi_receivers = value
+        .get("ndiReceivers")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value.get("ndiReceivers").and_then(Value::as_f64).map(|v| {
+                if v < 0.0 {
+                    0
+                } else {
+                    v as u64
+                }
+            })
+        });
+    let syphon_clients = value
+        .get("syphonClients")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value.get("syphonClients").and_then(Value::as_f64).map(|v| {
+                if v < 0.0 {
+                    0
+                } else {
+                    v as u64
+                }
+            })
+        });
     Some(HelperPlayerPerf {
         player_id,
         decode_backend: value
@@ -1837,12 +1871,8 @@ fn detect_ndi_runtime() -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        let candidates = [
-            r"C:\Program Files\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll",
-            r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll",
-        ];
-        for candidate in candidates {
-            if Path::new(candidate).exists() {
+        for candidate in ndi_library_candidates_windows() {
+            if Path::new(&candidate).exists() {
                 return true;
             }
         }
@@ -1874,6 +1904,33 @@ fn detect_ndi_runtime() -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "windows")]
+fn ndi_library_candidates_windows() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push(r"C:\Program Files\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 6 Tools\Remote\Processing.NDI.Lib.x64.dll".to_string());
+    candidates
+        .push(r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll".to_string());
+    if let Some(path_value) = env::var_os("PATH") {
+        for path_entry in env::split_paths(&path_value) {
+            let candidate = path_entry.join("Processing.NDI.Lib.x64.dll");
+            candidates.push(candidate.to_string_lossy().into_owned());
+        }
+    }
+    candidates
 }
 
 #[cfg(target_os = "macos")]

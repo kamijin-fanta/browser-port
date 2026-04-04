@@ -18,6 +18,10 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::os::raw::c_char;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use std::ptr;
 #[cfg(target_os = "windows")]
@@ -25,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(target_os = "windows")]
-use windows::core::{IUnknown, Interface, Type};
+use windows::core::{IUnknown, Interface, Type, PCWSTR};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, RECT};
 #[cfg(target_os = "windows")]
@@ -66,6 +70,8 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::System::LibraryLoader::LoadLibraryW;
 
 const PROTOCOL_VERSION: i64 = 1;
 const MSG_TYPE_VIDEO: u8 = 1;
@@ -6209,6 +6215,9 @@ struct NdiState {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 impl NdiState {
     fn new() -> anyhow::Result<Self> {
+        #[cfg(target_os = "windows")]
+        load_ndi_runtime_module_windows().context("failed to locate/load NDI runtime DLL")?;
+
         if !unsafe { ndi::internal::bindings::NDIlib_initialize() } {
             bail!("NDIlib_initialize failed");
         }
@@ -6383,6 +6392,71 @@ impl Drop for NdiState {
         self.senders.clear();
         unsafe { ndi::internal::bindings::NDIlib_destroy() };
     }
+}
+
+#[cfg(target_os = "windows")]
+fn load_ndi_runtime_module_windows() -> anyhow::Result<()> {
+    let mut missing_checked = 0_u32;
+    let mut load_errors = Vec::new();
+    for candidate in ndi_library_candidates_windows() {
+        if !candidate.exists() {
+            missing_checked = missing_checked.saturating_add(1);
+            continue;
+        }
+        let mut wide = candidate.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide.push(0);
+        let module = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) };
+        if module.is_ok() {
+            eprintln!(
+                "output-helper: loaded ndi runtime path={}",
+                candidate.display()
+            );
+            return Ok(());
+        }
+        let err = module
+            .err()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown load failure".to_string());
+        load_errors.push(format!("{} ({err})", candidate.display()));
+    }
+
+    if !load_errors.is_empty() {
+        bail!(
+            "Processing.NDI.Lib.x64.dll was found but could not be loaded: {}",
+            load_errors.join(" | ")
+        );
+    }
+
+    bail!(
+        "Processing.NDI.Lib.x64.dll was not found in known locations (checked {} entries)",
+        missing_checked
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn ndi_library_candidates_windows() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = std::env::var("BROWSER_PORT_NDI_LIBRARY_PATH") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            candidates.push(PathBuf::from(trimmed));
+        }
+    }
+    for literal in [
+        r"C:\Program Files\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll",
+        r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll",
+        r"C:\Program Files\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll",
+        r"C:\Program Files\NDI\NDI 6 Tools\Remote\Processing.NDI.Lib.x64.dll",
+        r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll",
+    ] {
+        candidates.push(Path::new(literal).to_path_buf());
+    }
+    if let Some(path_value) = std::env::var_os("PATH") {
+        for entry in std::env::split_paths(&path_value) {
+            candidates.push(entry.join("Processing.NDI.Lib.x64.dll"));
+        }
+    }
+    candidates
 }
 
 #[cfg(target_os = "macos")]
