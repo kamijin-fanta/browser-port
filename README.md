@@ -1,248 +1,59 @@
-# BrowserPort
-
-BrowserPort is a desktop relay + Chrome extension pair for streaming browser media from Chrome tabs to local outputs.
 ![BrowserPort Logo](./icons/logo.png)
 
-- Agent (`agent/`): Rust WebSocket relay and output helper manager
-- Chrome extension (`extention/`): capture/control UI and relay client
+BrowserPort is a Chrome extension + desktop agent relay for sending browser video/audio to local creative/video apps.
 
-The default local endpoint is `ws://127.0.0.1:1844`.
+[日本語版 README](./README_JP.md) | [Contributing](./contributing.md)
 
-## For Users
+## Overview
 
-### 1. Download build artifacts
+- Chrome extension captures media from Chrome tabs.
+- Desktop `agent` receives streams over local WebSocket (`ws://127.0.0.1:1844` by default).
+- Agent outputs to:
+  - `Spout2` on Windows
+  - `Syphon` on macOS
+  - `NDI` when NDI Runtime is available on the host
+- Output can be consumed by OBS, VDMX6, and other VJ/video tools.
 
-Every push/PR triggers a cross-platform build on GitHub Actions.
-Pushing a release tag (`vMAJOR.MINOR.PATCH`) also publishes a GitHub Release automatically:
+## Flow
 
-- Workflow: `.github/workflows/build-artifacts.yml`
-- Artifacts:
-  - `browser-port-windows`
-  - `browser-port-linux`
-  - `browser-port-macos`
+BrowserPort captures video in Chrome, relays it to a local native process, and republishes it through low-latency media interop outputs (Spout2/Syphon/NDI).
 
-Each artifact includes:
-
-- Installer package (OS-specific)
-- Standalone executable/binary
-- Chrome extension zip
-
-### 2. Install or run BrowserPort agent
-
-#### Windows
-
-- Installer: `browser-port-<version>-x86_64-pc-windows-msvc-unsigned.msi`
-- Standalone: `browser-port-<version>-x86_64-pc-windows-msvc.exe`
-
-#### macOS
-
-- Installer: `browser-port-<version>-aarch64-apple-darwin-unsigned.dmg`
-- Standalone: `browser-port-<version>-aarch64-apple-darwin`
-
-#### Linux
-
-- Installer tarball: `browser-port-<version>-x86_64-unknown-linux-gnu-linux-installer.tar.gz`
-- Standalone: `browser-port-<version>-x86_64-unknown-linux-gnu`
-
-Install from tarball:
-
-```bash
-tar -xzf browser-port-<version>-x86_64-unknown-linux-gnu-linux-installer.tar.gz
-sudo ./install.sh
+```mermaid
+flowchart LR
+  A[Chrome Tab] --> B[BrowserPort Chrome Extension]
+  B -->|WebSocket<br/>ws://127.0.0.1:1844| C[BrowserPort Agent]
+  C --> D[Spout2 Output<br/>Windows]
+  C --> E[Syphon Output<br/>macOS]
+  C --> F[NDI Output<br/>NDI Runtime]
+  D --> G[OBS / Resolume / VJ Apps]
+  E --> G
+  F --> G
 ```
 
-### 3. Load Chrome extension
+## Install
 
-1. Open `chrome://extensions`
-2. Enable Developer mode
-3. Choose one:
-   - Load unpacked: select `extention/`
-   - Packed artifact: unzip `browser-port-chrome-extension-<version>.zip`, then load unpacked from the extracted directory
+Download the latest artifacts from GitHub Releases:
 
-### 4. Start the agent
+- https://github.com/kamijin-fanta/browser-port/releases
 
-- Windows/macOS: app starts as tray/menu-bar style background app
-- Linux: run from terminal
+Use matching versions for the Chrome Extension and Agent. Do not mix different version numbers.
 
-Default bind address:
+| Component | Example file |
+| --- | --- |
+| Agent (Windows MSI) | `browser-port-<version>-x86_64-pc-windows-msvc-unsigned.msi` |
+| Agent (Windows standalone) | `browser-port-<version>-x86_64-pc-windows-msvc.exe` |
+| Agent (macOS) | `browser-port-<version>-aarch64-apple-darwin-unsigned.dmg` |
+| Agent (Linux) | `browser-port-<version>-x86_64-unknown-linux-gnu-linux-installer.tar.gz` |
+| Chrome Extension | `browser-port-chrome-extension-<version>.zip` |
 
-- `ws://127.0.0.1:1844`
+## Quick Start
 
-## For Developers
+1. Install or launch the Agent from the release package.
+2. Open `chrome://extensions`, enable Developer mode, then load the unzipped extension package.
+3. Start streaming from the extension.
+4. Select BrowserPort output in your target app (Spout2/Syphon/NDI).
 
-### Prerequisites
+## Notes
 
-- Rust stable toolchain
-- Git submodules
-- Platform dependencies:
-  - Windows MSI build: WiX Toolset v3 (`candle.exe`, `light.exe`)
-  - macOS installer build: `hdiutil`, `sips`, `iconutil`
-
-### Clone
-
-```bash
-git clone --recurse-submodules <repo-url>
-cd browser-port
-```
-
-If already cloned:
-
-```bash
-git submodule update --init --recursive
-```
-
-### Run locally
-
-```bash
-cd agent
-cargo run --bin browser-port
-```
-
-Optional bind override:
-
-```bash
-BROWSER_PORT_AGENT_BIND=127.0.0.1:1844 cargo run --bin browser-port
-```
-
-PowerShell:
-
-```powershell
-$env:BROWSER_PORT_AGENT_BIND = "127.0.0.1:1844"
-cargo run --bin browser-port
-```
-
-## Build Artifacts Locally
-
-Resolve versions from git state first:
-
-```bash
-./scripts/versioning/resolve-version
-```
-
-### Windows (MSI + standalone)
-
-```powershell
-cd agent
-.\installer\windows\build-msi.ps1 `
-  -Target x86_64-pc-windows-msvc `
-  -OutputDir "$PWD\target\dist" `
-  -Version "<full-version>" `
-  -ManifestVersion "<release-version>"
-```
-
-### macOS (DMG + standalone)
-
-```bash
-cd agent
-OUTPUT_DIR="$PWD/target/dist" \
-TARGET_TRIPLE="$(rustc -vV | awk '/host:/ {print $2}')" \
-VERSION="<full-version>" \
-MANIFEST_VERSION="<release-version>" \
-APP_VERSION="<release-version>" \
-./installer/macos/build-dmg.sh
-```
-
-### Linux (installer tar + standalone)
-
-```bash
-cd agent
-OUTPUT_DIR="$PWD/target/dist" \
-TARGET_TRIPLE="$(rustc -vV | awk '/host:/ {print $2}')" \
-VERSION="<full-version>" \
-MANIFEST_VERSION="<release-version>" \
-./installer/linux/build-tar.sh
-```
-
-### Chrome extension zip
-
-```powershell
-./extention/package-extension.ps1 `
-  -OutputDir "$PWD/extention/target" `
-  -Version "<full-version>" `
-  -ManifestVersion "<release-version>" `
-  -VersionName "<full-version for dev only>"
-```
-
-## Versioning and Releases
-
-- Single source of truth is `git tag` in `vMAJOR.MINOR.PATCH` format.
-- Release tag on `HEAD`:
-  - `RELEASE_VERSION = X.Y.Z`
-  - `FULL_VERSION = X.Y.Z`
-- Non-tag commit:
-  - nearest release tag is used as base
-  - `FULL_VERSION = X.Y.Z-dev.<N>+g<sha>`
-- If no release tag exists, baseline `v0.1.0` is used.
-
-Resolver script:
-
-```bash
-./scripts/versioning/resolve-version
-```
-
-Outputs fixed keys:
-
-- `RELEASE_VERSION`
-- `FULL_VERSION`
-- `IS_TAG_RELEASE`
-- `TAG_NAME`
-- `COMMITS_SINCE_TAG`
-- `SHORT_SHA`
-
-Chrome extension packaging policy:
-
-- `manifest.json` in repository is not edited.
-- Staged extension manifest always sets `version=<release-version>`.
-- Dev build only: staged manifest adds `version_name=<full-version>`.
-
-Release operation:
-
-1. Create and push tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
-2. CI validates tag format (`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-3. CI uploads matrix artifacts and publishes GitHub Release for that tag
-
-## CI Workflow
-
-`build-artifacts.yml` runs on `push`, `pull_request`, and manual dispatch.
-`v*` tag push additionally triggers GitHub Release publishing.
-
-Matrix targets:
-
-- `windows-latest` (`x86_64-pc-windows-msvc`)
-- `ubuntu-latest` (`x86_64-unknown-linux-gnu`)
-- `macos-14` (`aarch64-apple-darwin`)
-
-Per job outputs uploaded as an artifact:
-
-- installer package
-- standalone binary
-- `browser-port-chrome-extension-<version>.zip`
-
-## Repository Layout
-
-- `agent/`: Rust relay/output helper
-- `extention/`: Chrome extension sources (directory name kept as `extention`)
-- `agent/installer/windows/`: Windows installer build script
-- `agent/installer/macos/`: macOS installer build scripts
-- `agent/installer/linux/`: Linux installer tarball build script
-- `scripts/versioning/`: git tag driven version resolution scripts
-- `.github/workflows/`: CI workflows
-
-## Runtime Notes
-
-- Windows launches as tray app by default.
-- macOS launches as menu-bar app by default.
-- macOS bundled app registers itself as a login item via `SMAppService` on launch.
-- Set `BROWSER_PORT_HEADLESS=true` to disable tray/menu-bar startup mode.
-- Set `BROWSER_PORT_TRAY=true` to force tray/menu-bar mode when supported.
-
-## Troubleshooting
-
-- Tray icon present but no process:
-  - This is usually a stale shell icon cache entry.
-  - Restart Explorer (Windows) or relaunch the app.
-- Second launch does not open another tray icon on Windows:
-  - Expected behavior (single-instance guard enabled).
-- Extension shows disconnected:
-  - Verify agent is running.
-  - Verify WebSocket URL in extension settings (`ws://127.0.0.1:1844` by default).
+- On macOS, use Syphon instead of Spout.
+- On hosts without NDI Runtime, NDI output remains unavailable while BrowserPort itself still runs.

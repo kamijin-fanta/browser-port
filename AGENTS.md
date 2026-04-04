@@ -80,3 +80,7 @@ Run the MSI and validate:
 - Installer payload includes only `browser-port.exe`.
 - `PATH` feature is not shown.
 - `Start Menu Shortcut` feature is shown as optional.
+
+## Documentation Sync Rule
+
+- When `README.md` is changed, update `README_JP.md` in the same change set to keep Japanese translation in sync.
