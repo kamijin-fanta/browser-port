@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -16,10 +18,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
 mod output_helper;
 
@@ -733,9 +731,6 @@ impl Drop for OutputProcessManager {
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    maybe_hide_console_window_for_direct_launch();
-
     if let Some(helper_args) = output_helper::parse_from_env()? {
         let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
         return rt.block_on(output_helper::run(helper_args));
@@ -746,21 +741,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     run_headless_browser_port()
-}
-
-#[cfg(target_os = "windows")]
-fn maybe_hide_console_window_for_direct_launch() {
-    let mut process_ids = [0_u32; 8];
-    let process_count = unsafe { GetConsoleProcessList(&mut process_ids) };
-    // When launched from cmd/powershell, multiple processes share the same console.
-    if process_count <= 1 {
-        let hwnd = unsafe { GetConsoleWindow() };
-        if !hwnd.0.is_null() {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-            }
-        }
-    }
 }
 
 fn should_launch_menu_bar_app() -> bool {
