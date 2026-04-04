@@ -12,14 +12,17 @@ fn configure_windows_executable_icon() {
         return;
     }
 
-    let icon_rel = std::path::PathBuf::from("..").join("icons").join("trimed.ico");
-    println!("cargo:rerun-if-changed={}", icon_rel.display());
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"),
+    );
+    let icon_path = manifest_dir.join("..").join("icons").join("trimed.ico");
+    if !icon_path.is_file() {
+        panic!("Windows icon not found: {}", icon_path.display());
+    }
+    println!("cargo:rerun-if-changed={}", icon_path.display());
 
     #[cfg(windows)]
     {
-        let icon_path = std::env::current_dir()
-            .map(|cwd| cwd.join(&icon_rel))
-            .unwrap_or(icon_rel);
         let mut res = winres::WindowsResource::new();
         res.set_icon(icon_path.to_string_lossy().as_ref());
         if let Err(err) = res.compile() {
