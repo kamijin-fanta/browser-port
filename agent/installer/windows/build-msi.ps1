@@ -51,17 +51,33 @@ try {
         $cargoTomlBackupPath = [System.IO.Path]::GetTempFileName()
         Copy-Item -Path $cargoTomlPath -Destination $cargoTomlBackupPath -Force
 
-        $cargoTomlRaw = Get-Content -Path $cargoTomlPath -Raw
-        $updatedCargoToml = [regex]::Replace(
-            $cargoTomlRaw,
-            '^version\s*=\s*".*"$',
-            "version = ""$ManifestVersion""",
-            [System.Text.RegularExpressions.RegexOptions]::Multiline
-        )
-        if ($updatedCargoToml -eq $cargoTomlRaw) {
+        $cargoTomlLines = Get-Content -Path $cargoTomlPath
+        $updated = $false
+        $inPackageSection = $false
+        for ($i = 0; $i -lt $cargoTomlLines.Count; $i++) {
+            $line = [string]$cargoTomlLines[$i]
+            if ($line -match '^\s*\[package\]\s*$') {
+                $inPackageSection = $true
+                continue
+            }
+            if ($inPackageSection -and $line -match '^\s*\[.+\]\s*$') {
+                break
+            }
+            if ($inPackageSection -and $line -match '^\s*version\s*=\s*".*"\s*$') {
+                $indent = ""
+                if ($line -match '^(\s*)') {
+                    $indent = $Matches[1]
+                }
+                $cargoTomlLines[$i] = "$indent" + "version = ""$ManifestVersion"""
+                $updated = $true
+                break
+            }
+        }
+
+        if (-not $updated) {
             throw "Failed to update version in $cargoTomlPath"
         }
-        Set-Content -Path $cargoTomlPath -Value $updatedCargoToml -NoNewline
+        Set-Content -Path $cargoTomlPath -Value $cargoTomlLines
 
         if (Test-Path $cargoLockPath) {
             $cargoLockBackupPath = [System.IO.Path]::GetTempFileName()
