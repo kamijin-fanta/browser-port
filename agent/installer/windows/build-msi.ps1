@@ -2,6 +2,7 @@ param(
     [string]$Target = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "",
     [string]$Version = "",
+    [string]$ManifestVersion = "",
     [switch]$SkipBuild
 )
 
@@ -10,23 +11,61 @@ Set-StrictMode -Version Latest
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AgentDir = Resolve-Path (Join-Path $ScriptDir "..\..")
+$cargoTomlPath = Join-Path $AgentDir "Cargo.toml"
+$cargoLockPath = Join-Path $AgentDir "Cargo.lock"
+
+function Get-CargoPackageVersion {
+    param([string]$Path)
+    $versionLine = Select-String -Path $Path -Pattern '^version\s*=\s*"(.*)"' | Select-Object -First 1
+    if (-not $versionLine) {
+        throw "Could not determine package version from $Path"
+    }
+    return $versionLine.Matches[0].Groups[1].Value
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $AgentDir "target\dist"
 }
 
+$cargoVersion = Get-CargoPackageVersion -Path $cargoTomlPath
+if ([string]::IsNullOrWhiteSpace($ManifestVersion)) {
+    $ManifestVersion = $cargoVersion
+}
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $cargoTomlPath = Join-Path $AgentDir "Cargo.toml"
-    $versionLine = Select-String -Path $cargoTomlPath -Pattern '^version\s*=\s*"(.*)"' | Select-Object -First 1
-    if (-not $versionLine) {
-        throw "Could not determine package version from $cargoTomlPath"
-    }
-    $Version = $versionLine.Matches[0].Groups[1].Value
+    $Version = $ManifestVersion
+}
+if ($ManifestVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+    throw "ManifestVersion must be numeric semver-ish (for example: 0.1.0): $ManifestVersion"
 }
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+$cargoTomlBackupPath = $null
+$cargoLockBackupPath = $null
 Push-Location $AgentDir
 try {
+    if ($ManifestVersion -ne $cargoVersion) {
+        Write-Host "[BrowserPort] Temporarily syncing Cargo.toml version to $ManifestVersion for MSI metadata"
+        $cargoTomlBackupPath = [System.IO.Path]::GetTempFileName()
+        Copy-Item -Path $cargoTomlPath -Destination $cargoTomlBackupPath -Force
+
+        $cargoTomlRaw = Get-Content -Path $cargoTomlPath -Raw
+        $updatedCargoToml = [regex]::Replace(
+            $cargoTomlRaw,
+            '^version\s*=\s*".*"$',
+            "version = ""$ManifestVersion""",
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+        )
+        if ($updatedCargoToml -eq $cargoTomlRaw) {
+            throw "Failed to update version in $cargoTomlPath"
+        }
+        Set-Content -Path $cargoTomlPath -Value $updatedCargoToml -NoNewline
+
+        if (Test-Path $cargoLockPath) {
+            $cargoLockBackupPath = [System.IO.Path]::GetTempFileName()
+            Copy-Item -Path $cargoLockPath -Destination $cargoLockBackupPath -Force
+        }
+    }
+
     if (-not $SkipBuild) {
         Write-Host "[BrowserPort] Building release binary for $Target"
         cargo build --release --bin browser-port --target $Target
@@ -81,5 +120,13 @@ Example (admin shell): choco install wixtoolset -y
 
     Write-Host "[BrowserPort] Installer: $installerOut"
 } finally {
+    if ($cargoTomlBackupPath) {
+        Copy-Item -Path $cargoTomlBackupPath -Destination $cargoTomlPath -Force
+        Remove-Item -Path $cargoTomlBackupPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($cargoLockBackupPath) {
+        Copy-Item -Path $cargoLockBackupPath -Destination $cargoLockPath -Force
+        Remove-Item -Path $cargoLockBackupPath -Force -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }

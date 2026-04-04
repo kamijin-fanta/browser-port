@@ -2,6 +2,10 @@ name: Build Artifacts
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "*"
   pull_request:
   workflow_dispatch:
 
@@ -27,7 +31,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          fetch-depth: 0
+          fetch-tags: true
           submodules: recursive
+
+      - name: Validate Tag Format
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag format: ${GITHUB_REF_NAME}" >&2
+            echo "Expected format: vMAJOR.MINOR.PATCH (example: v0.1.0)" >&2
+            exit 1
+          fi
+
+      - name: Resolve Version
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/versioning/resolve-version
+          ./scripts/versioning/resolve-version > "$RUNNER_TEMP/version.env"
+          cat "$RUNNER_TEMP/version.env"
+          while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            echo "$line" >> "$GITHUB_ENV"
+          done < "$RUNNER_TEMP/version.env"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,25 +80,45 @@ jobs:
         run: |
           ./agent/installer/windows/build-msi.ps1 `
             -Target "${{ matrix.target }}" `
-            -OutputDir "$PWD/agent/target/dist"
+            -OutputDir "$PWD/agent/target/dist" `
+            -Version "$env:FULL_VERSION" `
+            -ManifestVersion "$env:RELEASE_VERSION"
 
       - name: Build Linux Installer + Standalone
         if: matrix.os_name == 'linux'
         shell: bash
         run: |
           chmod +x ./agent/installer/linux/build-tar.sh
-          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/linux/build-tar.sh
+          OUTPUT_DIR="$PWD/agent/target/dist" \
+          TARGET_TRIPLE="${{ matrix.target }}" \
+          VERSION="$FULL_VERSION" \
+          MANIFEST_VERSION="$RELEASE_VERSION" \
+          ./agent/installer/linux/build-tar.sh
 
       - name: Build macOS Installer + Standalone
         if: matrix.os_name == 'macos'
         shell: bash
         run: |
           chmod +x ./agent/installer/macos/build-dmg.sh
-          OUTPUT_DIR="$PWD/agent/target/dist" TARGET_TRIPLE="${{ matrix.target }}" ./agent/installer/macos/build-dmg.sh
+          OUTPUT_DIR="$PWD/agent/target/dist" \
+          TARGET_TRIPLE="${{ matrix.target }}" \
+          VERSION="$FULL_VERSION" \
+          MANIFEST_VERSION="$RELEASE_VERSION" \
+          APP_VERSION="$RELEASE_VERSION" \
+          ./agent/installer/macos/build-dmg.sh
 
       - name: Package Chrome Extension
         shell: pwsh
-        run: ./extention/package-extension.ps1 -OutputDir "$PWD/extention/target"
+        run: |
+          $versionName = ""
+          if ($env:IS_TAG_RELEASE -ne "true") {
+            $versionName = $env:FULL_VERSION
+          }
+          ./extention/package-extension.ps1 `
+            -OutputDir "$PWD/extention/target" `
+            -Version "$env:FULL_VERSION" `
+            -ManifestVersion "$env:RELEASE_VERSION" `
+            -VersionName $versionName
 
       - name: Assemble Artifact Files
         shell: pwsh
@@ -102,3 +151,36 @@ jobs:
           name: browser-port-${{ matrix.os_name }}
           path: ci-artifacts/${{ matrix.os_name }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Matrix Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+
+      - name: Collect Release Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-files
+          while IFS= read -r -d '' file; do
+            cp "$file" "release-files/$(basename "$file")"
+          done < <(find release-artifacts -type f -print0)
+          ls -la release-files
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-files/*

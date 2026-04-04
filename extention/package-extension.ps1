@@ -1,6 +1,8 @@
 param(
     [string]$OutputDir = "",
-    [string]$Version = ""
+    [string]$Version = "",
+    [string]$ManifestVersion = "",
+    [string]$VersionName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,9 +14,17 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $ScriptDir "target"
 }
 
+$manifest = Get-Content (Join-Path $ScriptDir "manifest.json") -Raw | ConvertFrom-Json
+
+if ([string]::IsNullOrWhiteSpace($ManifestVersion)) {
+    $ManifestVersion = [string]$manifest.version
+}
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $manifest = Get-Content (Join-Path $ScriptDir "manifest.json") -Raw | ConvertFrom-Json
-    $Version = [string]$manifest.version
+    $Version = $ManifestVersion
+}
+
+if ($ManifestVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+    throw "ManifestVersion must be numeric semver-ish (for example: 0.1.0): $ManifestVersion"
 }
 
 $zipPath = Join-Path $OutputDir "browser-port-chrome-extension-$Version.zip"
@@ -33,6 +43,24 @@ Get-ChildItem -Path $ScriptDir -Force |
     ForEach-Object {
         Copy-Item -Path $_.FullName -Destination $stageDir -Recurse -Force
     }
+
+$stagedManifestPath = Join-Path $stageDir "manifest.json"
+$stagedManifest = Get-Content $stagedManifestPath -Raw | ConvertFrom-Json
+$stagedManifest.version = $ManifestVersion
+
+if ([string]::IsNullOrWhiteSpace($VersionName)) {
+    if ($stagedManifest.PSObject.Properties.Name -contains "version_name") {
+        $stagedManifest.PSObject.Properties.Remove("version_name")
+    }
+} else {
+    if ($stagedManifest.PSObject.Properties.Name -contains "version_name") {
+        $stagedManifest.version_name = $VersionName
+    } else {
+        $stagedManifest | Add-Member -MemberType NoteProperty -Name "version_name" -Value $VersionName
+    }
+}
+
+$stagedManifest | ConvertTo-Json -Depth 16 | Set-Content -Path $stagedManifestPath
 
 if (Test-Path $zipPath) {
     Remove-Item -Force $zipPath

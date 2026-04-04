@@ -31,7 +31,7 @@ Expected files:
 ### 3. Verify standalone EXE behavior
 
 ```powershell
-$exe = Resolve-Path "$dest/browser-port-0.1.0-x86_64-pc-windows-msvc.exe" # replace version if needed
+$exe = Resolve-Path "$dest/browser-port-<version>-x86_64-pc-windows-msvc.exe" # replace <version>
 try {
   $p = Start-Process -FilePath $exe.Path -PassThru -WindowStyle Hidden
   Start-Sleep -Seconds 2
