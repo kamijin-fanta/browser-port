@@ -16,7 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 
 const REFRESH_INTERVAL_SECONDS: f64 = 1.0;
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray_icon.png");
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../../icons/mac-tray.png");
 const TRAY_ICON_WIDTH: f64 = 24.0;
 const TRAY_ICON_HEIGHT: f64 = 18.0;
 const PLAYER_COUNT: u32 = 4;

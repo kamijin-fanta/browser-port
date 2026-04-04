@@ -12,7 +12,7 @@ fn configure_windows_executable_icon() {
         return;
     }
 
-    let icon_rel = std::path::PathBuf::from("assets").join("browser-port.ico");
+    let icon_rel = std::path::PathBuf::from("..").join("icons").join("trimed.ico");
     println!("cargo:rerun-if-changed={}", icon_rel.display());
 
     #[cfg(windows)]

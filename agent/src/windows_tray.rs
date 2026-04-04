@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WNDCLASSW,
 };
 
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray_icon.png");
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../../icons/win-task.png");
 const TRAY_ICON_SIZE: u32 = 16;
 const WM_TRAYICON: u32 = WM_APP + 1;
 const TRAY_ICON_ID: u32 = 1;
@@ -334,7 +334,7 @@ unsafe fn remove_tray_icon(hwnd: HWND) -> anyhow::Result<()> {
 }
 
 unsafe fn load_tray_icon() -> anyhow::Result<HICON> {
-    let image = image::load_from_memory(TRAY_ICON_PNG).context("failed to decode tray_icon.png")?;
+    let image = image::load_from_memory(TRAY_ICON_PNG).context("failed to decode win-task.png")?;
     let rgba = image
         .resize_exact(TRAY_ICON_SIZE, TRAY_ICON_SIZE, FilterType::Lanczos3)
         .into_rgba8();

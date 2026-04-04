@@ -1,6 +1,7 @@
 # BrowserPort
 
 BrowserPort is a desktop relay + Chrome extension pair for streaming browser media from Chrome tabs to local outputs.
+![BrowserPort Logo](./icons/logo.png)
 
 - Agent (`agent/`): Rust WebSocket relay and output helper manager
 - Chrome extension (`extention/`): capture/control UI and relay client

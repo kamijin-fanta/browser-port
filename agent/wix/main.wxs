@@ -34,7 +34,7 @@
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='ProgramMenuFolder'>
-                <Directory Id='ApplicationProgramsFolder' Name='browser-port'/>
+                <Directory Id='ApplicationProgramsFolder' Name='Browser Port'/>
             </Directory>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='browser-port'>
@@ -49,8 +49,8 @@
                     <Component Id='StartMenuShortcutComponent' Guid='*'>
                         <Shortcut
                             Id='ApplicationStartMenuShortcut'
-                            Name='browser-port'
-                            Description='Launch browser-port'
+                            Name='Browser Port'
+                            Description='Launch Browser Port'
                             Directory='ApplicationProgramsFolder'
                             Target='[APPLICATIONFOLDER]browser-port.exe'
                             WorkingDirectory='APPLICATIONFOLDER'/>
