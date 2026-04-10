@@ -32,7 +32,7 @@
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='browser-port Installation'/>
-        <WixVariable Id='WixUILicenseRtf' Value='license.rtf'/>
+        <WixVariable Id='WixUILicenseRtf' Value='$(var.CargoManifestDir)\wix\license.rtf'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='ProgramMenuFolder'>
