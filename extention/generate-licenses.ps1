@@ -18,11 +18,31 @@ function Convert-ToProjectRelativePath {
         [Parameter(Mandatory = $true)][string]$AbsolutePath
     )
 
-    $root = [System.Uri]((Resolve-Path $ProjectRoot).Path.TrimEnd('\') + '\')
-    $target = [System.Uri]((Resolve-Path $AbsolutePath).Path)
-    return [System.Uri]::UnescapeDataString(
-        $root.MakeRelativeUri($target).ToString().Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    $rootPath = (Resolve-Path $ProjectRoot).Path
+    $targetPath = (Resolve-Path $AbsolutePath).Path
+    $method = [System.IO.Path].GetMethod(
+        "GetRelativePath",
+        [Type[]]@([string], [string])
     )
+    if ($method) {
+        return [System.IO.Path]::GetRelativePath($rootPath, $targetPath)
+    }
+
+    # Fallback for older PowerShell/.NET runtimes without Path.GetRelativePath.
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $rootFullPath = [System.IO.Path]::GetFullPath($rootPath)
+    if (-not $rootFullPath.EndsWith($sep)) {
+        $rootFullPath += $sep
+    }
+    $targetFullPath = [System.IO.Path]::GetFullPath($targetPath)
+
+    $rootUriText = "file:///" + ($rootFullPath -replace "\\", "/").TrimStart("/")
+    $targetUriText = "file:///" + ($targetFullPath -replace "\\", "/").TrimStart("/")
+    $rootUri = [System.Uri]$rootUriText
+    $targetUri = [System.Uri]$targetUriText
+    $relativeUri = $rootUri.MakeRelativeUri($targetUri)
+
+    return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace("/", $sep)
 }
 
 function Invoke-CargoMetadata {

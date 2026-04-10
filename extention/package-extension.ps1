@@ -38,14 +38,21 @@ if (Test-Path $stageDir) {
 }
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
+$excludeNames = @(
+    "target",
+    "__chrome_extension_stage",
+    "package-extension.ps1",
+    "generate-licenses.ps1"
+)
+$resolvedOutputDir = (Resolve-Path $OutputDir).Path
+$outputLeafName = Split-Path -Leaf $resolvedOutputDir
+if (-not [string]::IsNullOrWhiteSpace($outputLeafName)) {
+    $excludeNames += $outputLeafName
+}
+
 Get-ChildItem -Path $ScriptDir -Force |
     Where-Object {
-        $_.Name -notin @(
-            "target",
-            "__chrome_extension_stage",
-            "package-extension.ps1",
-            "generate-licenses.ps1"
-        )
+        $_.Name -notin $excludeNames
     } |
     ForEach-Object {
         Copy-Item -Path $_.FullName -Destination $stageDir -Recurse -Force
