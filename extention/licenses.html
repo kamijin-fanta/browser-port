@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BrowserPort Licenses</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0b0b;
+      --panel: #131313;
+      --line: #2a2a2a;
+      --text: #ececec;
+      --muted: #b3b3b3;
+      --accent: #70a7ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 "Segoe UI", "Noto Sans", sans-serif;
+    }
+
+    .wrap {
+      max-width: 1024px;
+      margin: 0 auto;
+      padding: 20px 16px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    h1, h2 {
+      margin: 0;
+      line-height: 1.2;
+    }
+
+    h1 {
+      font-size: 24px;
+    }
+
+    h2 {
+      font-size: 17px;
+      margin-bottom: 8px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+    }
+
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #1a1a1a;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    #status {
+      min-height: 18px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>BrowserPort Licenses</h1>
+      <p id="status" class="muted">Loading license data...</p>
+    </header>
+
+    <section class="card">
+      <h2>Project License</h2>
+      <div id="project-license"></div>
+    </section>
+
+    <section class="card">
+      <h2>Rust Crates (Agent)</h2>
+      <div id="rust-crates"></div>
+    </section>
+
+    <section class="card">
+      <h2>Chrome Extension npm Packages</h2>
+      <div id="npm-packages"></div>
+    </section>
+
+    <section class="card">
+      <h2>Bundled Native Libraries</h2>
+      <div id="native-libraries"></div>
+    </section>
+
+    <section class="card">
+      <h2>Notes</h2>
+      <div id="notes"></div>
+    </section>
+  </main>
+  <script src="licenses.js"></script>
+</body>
+</html>

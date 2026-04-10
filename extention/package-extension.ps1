@@ -14,6 +14,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $ScriptDir "target"
 }
 
+$licensesScriptPath = Join-Path $ScriptDir "generate-licenses.ps1"
+
 $manifest = Get-Content (Join-Path $ScriptDir "manifest.json") -Raw | ConvertFrom-Json
 
 if ([string]::IsNullOrWhiteSpace($ManifestVersion)) {
@@ -38,11 +40,20 @@ New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 Get-ChildItem -Path $ScriptDir -Force |
     Where-Object {
-        $_.Name -notin @("target", "__chrome_extension_stage", "package-extension.ps1")
+        $_.Name -notin @(
+            "target",
+            "__chrome_extension_stage",
+            "package-extension.ps1",
+            "generate-licenses.ps1"
+        )
     } |
     ForEach-Object {
         Copy-Item -Path $_.FullName -Destination $stageDir -Recurse -Force
     }
+
+if (Test-Path $licensesScriptPath) {
+    & $licensesScriptPath -OutputPath (Join-Path $stageDir "licenses-third-party.json")
+}
 
 $stagedManifestPath = Join-Path $stageDir "manifest.json"
 $stagedManifest = Get-Content $stagedManifestPath -Raw | ConvertFrom-Json

@@ -18,6 +18,7 @@ const browserPortTextEl = document.getElementById('browser-port-text');
 const extensionVersionEl = document.getElementById('extension-version');
 const deckListEl = document.getElementById('players');
 const openSettingsEl = document.getElementById('open-settings');
+const openLicensesEl = document.getElementById('open-licenses');
 const closeSettingsEl = document.getElementById('close-settings');
 const settingsOverlayEl = document.getElementById('settings-overlay');
 const settingsFormEl = document.getElementById('settings-form');
@@ -52,6 +53,7 @@ const deckCards = new Map();
     setSettingsStatus('');
   });
   openSettingsEl.addEventListener('click', openSettingsOverlay);
+  openLicensesEl?.addEventListener('click', openLicensesPage);
   closeSettingsEl.addEventListener('click', closeSettingsOverlay);
   settingsOverlayEl.addEventListener('click', onOverlayClick);
   presetDefaultEl.addEventListener('click', applyDefaultPreset);
@@ -74,6 +76,10 @@ function updateExtensionVersion() {
   const manifest = chrome.runtime.getManifest();
   const version = manifest.version_name || manifest.version || 'N/A';
   extensionVersionEl.textContent = `Extension v${version}`;
+}
+
+function openLicensesPage() {
+  chrome.tabs.create({ url: chrome.runtime.getURL('licenses.html') });
 }
 
 function normalizeSettings(input) {

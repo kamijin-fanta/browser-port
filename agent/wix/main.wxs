@@ -32,6 +32,7 @@
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='browser-port Installation'/>
+        <WixVariable Id='WixUILicenseRtf' Value='license.rtf'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='ProgramMenuFolder'>
@@ -96,8 +97,10 @@
 
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
-            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
-            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='LicenseAgreementDlg' Order='99'>1</Publish>
+            <Publish Dialog='LicenseAgreementDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+            <Publish Dialog='LicenseAgreementDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>LicenseAccepted = "1"</Publish>
+            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='LicenseAgreementDlg' Order='99'>1</Publish>
         </UI>
     </Product>
 </Wix>

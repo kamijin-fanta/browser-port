@@ -413,6 +413,27 @@
     .bp-form-status.is-error {
       color: var(--bp-danger);
     }
+
+    .bp-footer {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: -2px;
+    }
+
+    .bp-link-button {
+      border: 1px solid var(--bp-border-strong);
+      border-radius: 4px;
+      background: var(--bp-panel-3);
+      color: var(--bp-text-soft);
+      font-size: 12px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    .bp-link-button:hover {
+      background: #2a2a2a;
+      color: var(--bp-text);
+    }
   </style>
 </head>
 <body class="bp-popup">
@@ -435,6 +456,10 @@
       <div class="bp-section-title">プレイヤー状態</div>
       <div id="players" class="bp-deck-list"></div>
     </section>
+
+    <footer class="bp-footer">
+      <button id="open-licenses" class="bp-link-button" type="button">Licenses</button>
+    </footer>
   </div>
 
   <div id="settings-overlay" class="bp-overlay" aria-hidden="true">
